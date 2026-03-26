@@ -43,8 +43,8 @@ class Parser:
 
         colmap_dir = os.path.join(data_dir, "sparse/0/")
         if not os.path.exists(colmap_dir):
-            # colmap_dir = os.path.join(data_dir, "sparse")
-            colmap_dir = os.path.join(data_dir, "colmap/sparse/0")
+            colmap_dir = os.path.join(data_dir, "sparse")
+            # colmap_dir = os.path.join(data_dir, "colmap/sparse/0")
         assert os.path.exists(
             colmap_dir
         ), f"COLMAP directory {colmap_dir} does not exist."
@@ -343,9 +343,9 @@ class Dataset:
             self.indices = indices
         else:
             if split == "train":
-                self.indices = indices[indices % self.parser.test_every == 0]
-            else:
                 self.indices = indices[indices % self.parser.test_every != 0]
+            else:
+                self.indices = indices[indices % self.parser.test_every == 0]
 
     def __len__(self):
         return len(self.indices)
@@ -428,11 +428,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="data/360_v2/garden")
     parser.add_argument("--factor", type=int, default=4)
+    parser.add_argument("--test_every", type=int, default=8)
     args = parser.parse_args()
 
     # Parse COLMAP data.
     parser = Parser(
-        data_dir=args.data_dir, factor=args.factor, normalize=True, test_every=8
+        data_dir=args.data_dir, factor=args.factor, normalize=True, test_every=args.test_every
     )
     dataset = Dataset(parser, split="train", load_depths=True)
     print(f"Dataset: {len(dataset)} images.")

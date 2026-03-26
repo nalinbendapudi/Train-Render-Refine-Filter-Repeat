@@ -1,11 +1,16 @@
 import json
 import math
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Union
+import yaml
+import random
+from copy import deepcopy
 
+from PIL import Image
 import imageio
 import nerfview
 import numpy as np
@@ -14,16 +19,8 @@ import torch.nn.functional as F
 import tqdm
 import tyro
 import viser
-import yaml
-import random
-from PIL import Image
-from copy import deepcopy
-from datasets.colmap import Dataset, Parser
-from datasets.traj import (
-    generate_interpolated_path,
-    generate_ellipse_path_z,
-    generate_spiral_path,
-)
+
+
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
@@ -32,6 +29,16 @@ from fused_ssim import fused_ssim
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from typing_extensions import Literal, assert_never
 from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
+
+from datasets.colmap import Dataset, Parser
+from datasets.traj import (
+    generate_interpolated_path,
+    generate_ellipse_path_z,
+    generate_spiral_path,
+)
+from filters import gs_like_corruption
+
+
 from lib_bilagrid import (
     BilateralGrid,
     slice,
@@ -44,6 +51,9 @@ from gsplat.distributed import cli
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat.optimizers import SelectiveAdam
+
+# Add repo root to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from examples.utils import CameraPoseInterpolator
 from src.pipeline_difix import DifixPipeline
@@ -85,17 +95,41 @@ class Config:
     # A global factor to scale the number of training steps
     steps_scaler: float = 1.0
 
-    # Number of training steps
-    max_steps: int = 60_000
+    """
+    Note  - At each training step, we do the following:
+    1. Calculate Loss
+    2. Save the checkpoint (if step-1 in save_steps)
+         - save checkpoints in renders/val/<step>
+    3. Optimize
+    4. Evaluate the model on val set (if step-1 in eval_steps)
+         - save rendered and GT images (input poses) in renders/val/<step>
+    5. Fix artifacts (if step-1 in fix_steps)
+         - save rendered and fixed images (novel trajectory poses) in renders/novel/<step>
+    """
+
+    # # Number of training steps
+    # max_steps: int = 60_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [1_0000, 2_0000, 3_0000, 3_5000, 4_0000, 4_5000, 5_0000, 5_5000, 6_0000])
+    # eval_steps: List[int] = field(default_factory=lambda: [1_0000, 2_0000, 3_0000, 3_5000, 4_0000, 4_5000, 5_0000, 5_5000, 6_0000])
+    # # Steps to save the model
+    # save_steps: List[int] = field(default_factory=lambda: [1_0000, 2_0000, 3_0000, 4_0000, 4_5000, 5_0000, 5_5000, 6_0000])
+    # # Steps to fix the artifacts
+    # fix_steps: List[int] = field(default_factory=lambda: [3_000, 6_000, 8_000, 10_000, 12_000, 14_000, 16_000, 18_000, 20_000, 22_000, 24_000, 26_000, 28_000, 30_000, 32_000, 34_000, 36_000, 38_000, 40_000, 42_000, 44_000, 46_000, 48_000, 50_000, 52_000, 54_000, 56_000, 58_000, 60_000])
+
+    # Number of training steps
+    max_steps: int = 10_000
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [1_0000, 2_0000, 3_0000, 4_0000, 4_5000, 5_0000, 5_5000, 6_0000])
+    save_steps: List[int] = field(default_factory=lambda: [10_000])
+    # Steps to evaluate the model
+    eval_steps: List[int] = field(default_factory=lambda: [10_000])
     # Steps to fix the artifacts
-    fix_steps: List[int] = field(default_factory=lambda: [3_000, 6_000, 8_000, 10_000, 12_000, 14_000, 16_000, 18_000, 20_000, 22_000, 24_000, 26_000, 28_000, 30_000, 32_000, 34_000, 36_000, 38_000, 40_000, 42_000, 44_000, 46_000, 48_000, 50_000, 52_000, 54_000, 56_000, 58_000, 60_000])
+    fix_steps: List[int] = field(default_factory=lambda: [])
+    
 
     # Initialization strategy
     init_type: str = "sfm"
+    # init_type: str = "random"
+    
     # Initial number of GSs. Ignored if using sfm
     init_num_pts: int = 100_000
     # Initial extent of GSs as a multiple of the camera extent. Ignored if using sfm
@@ -325,6 +359,9 @@ class Runner:
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
 
+        print("number of training images:", len(self.trainset.indices))
+        print("number of validation images:", len(self.valset.indices))
+
         # Model
         feature_dim = 32 if cfg.app_opt else None
         self.splats, self.optimizers = create_splats_with_optimizers(
@@ -463,6 +500,10 @@ class Runner:
         self.difix = DifixPipeline.from_pretrained("nvidia/difix_ref", trust_remote_code=True)
         self.difix.set_progress_bar_config(disable=True)
         self.difix.to("cuda")
+
+        # Corrupt Fixed images
+        self.corruption_ratio = 0.5
+        self.corrupt_indices = np.random.choice(len(self.trainset.indices), int(self.corruption_ratio * len(self.trainset.indices)), replace=False)
 
     def rasterize_splats(
         self,
@@ -859,11 +900,18 @@ class Runner:
     @torch.no_grad()
     def fix(self, step: int):
         print("Running fixer...")
-        if len(self.cfg.fix_steps) == 1:
+
+        if self.parser.test_every == 0:
+            # indices = trainset.indices = valset.indices
+            novel_poses = generate_interpolated_path(self.parser.camtoworlds, 1)
+            novel_poses = np.concatenate([novel_poses, 
+                                          np.repeat(np.array([[[0.0, 0.0, 0.0, 1.0]]]), len(novel_poses), axis=0),],
+                                        axis=1,)
+        elif len(self.cfg.fix_steps) == 1:
             novel_poses = self.parser.camtoworlds[self.valset.indices]
         else:
             novel_poses = self.interpolator.shift_poses(self.current_novel_poses, self.parser.camtoworlds[self.valset.indices], distance=0.5)
-        
+
         self.render_traj(step, novel_poses)
         image_paths = [f"{self.render_dir}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
 
@@ -878,14 +926,20 @@ class Runner:
         for i in tqdm.trange(0, len(novel_poses), desc="Fixing artifacts..."):
             image = Image.open(image_paths[i]).convert("RGB")
             ref_image = Image.open(ref_image_paths[i]).convert("RGB")
+            ref_image = ref_image.resize(image.size, Image.LANCZOS)
             output_image = self.difix(prompt="remove degradation", image=image, ref_image=ref_image, num_inference_steps=1, timesteps=[199], guidance_scale=0.0).images[0]
             output_image = output_image.resize(image.size, Image.LANCZOS)
+
+            if i in self.corrupt_indices:
+                # add corruption to the fixed image
+                output_image = gs_like_corruption(output_image)
+
             os.makedirs(f"{self.render_dir}/novel/{step}/Fixed", exist_ok=True)
             output_image.save(f"{self.render_dir}/novel/{step}/Fixed/{i:04d}.png")
             if ref_image is not None:
                 os.makedirs(f"{self.render_dir}/novel/{step}/Ref", exist_ok=True)
                 ref_image.save(f"{self.render_dir}/novel/{step}/Ref/{i:04d}.png")
-    
+            
         parser = deepcopy(self.parser)
         parser.test_every = 0
         parser.image_paths = [f"{self.render_dir}/novel/{step}/Fixed/{i:04d}.png" for i in range(len(novel_poses))]
@@ -1008,6 +1062,7 @@ class Runner:
         cfg = self.cfg
         device = self.device
 
+        # we generate a trajectory only if camtoworlds_all is not provided. 
         if camtoworlds_all is None:
             camtoworlds_all = self.parser.camtoworlds[5:-5]
             if cfg.render_traj_path == "interp":

@@ -1,0 +1,52 @@
+QUICK DEMO
+
+
+Data (input): 
+examples/single_img_data/<folder_name>/example_input.png
+examples/single_img_data/<folder_name>/example_ref.png
+
+Data (output): 
+examples/single_img_results/<folder_name>/example_output.png
+examples/single_img_results/<folder_name>/example_output_using_ref.png
+
+From repo-home (Difix3D) folder, run:
+python src/quick_demo.py
+
+===================================================================
+
+3DGS PROGRESSIVE UPDATE
+
+
+Data (input)
+examples/scene_data/imgs_and_colmap/<folder_name>
+examples/scene_data/intial_gsplat_ckpts/<folder_name>
+
+Data (output):
+examples/scene_results/<folder_name>/
+
+From repo-home (Difix3D) folder, run:
+bash run_progressive_3d_update_gsplat.sh
+OR
+CUDA_VISIBLE_DEVICES=0 python examples/gsplat/simple_trainer_difix3d.py default \
+--data_dir ${DATA} \
+--data_factor 4 \
+--result_dir ${OUTPUT_DIR}
+--no-normalize-world-space \
+--test_every 8 \
+--ckpt ${CKPT_PATH}
+
+
+===================================================================
+
+SIMPLE VIEWER
+
+In new terminal:
+conda activate gsplat
+cd ~/MyProjects/gsplat/examples
+
+CUDA_VISIBLE_DEVICES=0 python -m simple_viewer \
+--ckpt ~/MyProjects/Difix3D/examples/scene_results/gsplat_3D_update/ford-av-samples/mono-sample-with-colmap-init/ckpts/ckpt_9999_rank0.pt \
+--output_dir ~/MyProjects/Difix3D/examples/scene_results/gsplat_3D_update/ford-av-samples/mono-sample-with-colmap-init/ \
+--port 8082
+
+
