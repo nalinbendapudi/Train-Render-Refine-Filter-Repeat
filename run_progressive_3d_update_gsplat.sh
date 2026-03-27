@@ -9,5 +9,5 @@ CUDA_VISIBLE_DEVICES=0 python examples/gsplat/simple_trainer_difix3d.py default 
     --data_factor ${DATA_FACTOR} \
     --result_dir ${OUTPUT_DIR} \
     --no-normalize-world-space \
-    --test_every 8 \
+    --test_fraction 0.9 \
     --ckpt ${CKPT_PATH}

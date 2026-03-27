@@ -1,5 +1,6 @@
 import os
 import json
+from fractions import Fraction
 from typing import Any, Dict, List, Optional
 from typing_extensions import assert_never
 
@@ -34,17 +35,18 @@ class Parser:
         data_dir: str,
         factor: int = 1,
         normalize: bool = False,
-        test_every: int = 8,
+        test_fraction: float = 0.9,
     ):
         self.data_dir = data_dir
         self.factor = factor
         self.normalize = normalize
-        self.test_every = test_every
+        self.test_fraction = test_fraction
 
-        colmap_dir = os.path.join(data_dir, "sparse/0/")
+        colmap_dir = os.path.join(data_dir, "colmap/sparse/0/")
         if not os.path.exists(colmap_dir):
-            colmap_dir = os.path.join(data_dir, "sparse")
-            # colmap_dir = os.path.join(data_dir, "colmap/sparse/0")
+            colmap_dir = os.path.join(data_dir, "sparse/0/")
+        if not os.path.exists(colmap_dir):
+            colmap_dir = os.path.join(data_dir, "sparse/")
         assert os.path.exists(
             colmap_dir
         ), f"COLMAP directory {colmap_dir} does not exist."
@@ -332,20 +334,41 @@ class Dataset:
         self.load_depths = load_depths
         
         indices = np.arange(len(self.parser.image_names))
-        if self.parser.test_every == 1:
+        if self.parser.test_fraction > 1:
+            # Use image name patterns to split train and eval sets, if possible. 
             image_names = sorted(_get_rel_paths(f"{self.parser.data_dir}/images"), key=lambda x: int(x.split(".")[0].split("_")[-1]))
             assert len(image_names) == len(self.parser.image_names)
             if split == "train":
                 self.indices = [ind for ind in indices if "_train_" in image_names[ind]]
             else:
                 self.indices = [ind for ind in indices if "_eval_" in image_names[ind]]
-        elif self.parser.test_every == 0:
+        elif self.parser.test_fraction == 0:
+            # Use all images for training, no test set.
+            if split == "train":
+                self.indices = indices
+            else:
+                self.indices = []
+        elif self.parser.test_fraction == 1:
+            # Use all images for both training and evaluation
             self.indices = indices
         else:
-            if split == "train":
-                self.indices = indices[indices % self.parser.test_every != 0]
-            else:
-                self.indices = indices[indices % self.parser.test_every == 0]
+            frac = Fraction(self.parser.test_fraction).limit_denominator()
+            block_size = frac.denominator
+            n_train_block = block_size - frac.numerator
+            
+            i = 0
+            self.indices = []
+            while (i < len(indices)):
+                start = i
+                end = min(i + block_size, len(indices))  # clamp to dataset length
+
+                if split == "train":
+                    train_end = min(start + n_train_block, end)
+                    self.indices.extend(indices[start:train_end])
+                else:  # split == "test"
+                    test_start = min(start + n_train_block, end)
+                    self.indices.extend(indices[test_start:end])
+                i += block_size
 
     def __len__(self):
         return len(self.indices)
@@ -428,12 +451,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="data/360_v2/garden")
     parser.add_argument("--factor", type=int, default=4)
-    parser.add_argument("--test_every", type=int, default=8)
+    parser.add_argument("--test_fraction", type=float, default=0.125)
     args = parser.parse_args()
 
     # Parse COLMAP data.
     parser = Parser(
-        data_dir=args.data_dir, factor=args.factor, normalize=True, test_every=args.test_every
+        data_dir=args.data_dir, factor=args.factor, normalize=True, test_fraction=args.test_fraction
     )
     dataset = Dataset(parser, split="train", load_depths=True)
     print(f"Dataset: {len(dataset)} images.")

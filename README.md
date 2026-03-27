@@ -196,7 +196,7 @@ OUTPUT_DIR=outputs/difix3d/gsplat/${SCENE_ID}
 
 CUDA_VISIBLE_DEVICES=0 python examples/gsplat/simple_trainer_difix3d.py default \
     --data_dir ${DATA} --data_factor ${DATA_FACTOR} \
-    --result_dir ${OUTPUT_DIR} --no-normalize-world-space --test_every 1 --ckpt ${CKPT_PATH}
+    --result_dir ${OUTPUT_DIR} --no-normalize-world-space --test_fraction 1 --ckpt ${CKPT_PATH}
 ```
 
 

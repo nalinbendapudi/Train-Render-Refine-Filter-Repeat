@@ -77,7 +77,7 @@ class Config:
     # Directory to save results
     result_dir: str = "results/garden"
     # Every N images there is a test image
-    test_every: int = 8
+    test_fraction: float = 0.9
     # Random crop size for training  (experimental)
     patch_size: Optional[int] = None
     # A global scaler that applies to the scene size related parameters
@@ -107,15 +107,6 @@ class Config:
          - save rendered and fixed images (novel trajectory poses) in renders/novel/<step>
     """
 
-    # # Number of training steps
-    # max_steps: int = 60_000
-    # Steps to evaluate the model
-    # eval_steps: List[int] = field(default_factory=lambda: [1_0000, 2_0000, 3_0000, 3_5000, 4_0000, 4_5000, 5_0000, 5_5000, 6_0000])
-    # # Steps to save the model
-    # save_steps: List[int] = field(default_factory=lambda: [1_0000, 2_0000, 3_0000, 4_0000, 4_5000, 5_0000, 5_5000, 6_0000])
-    # # Steps to fix the artifacts
-    # fix_steps: List[int] = field(default_factory=lambda: [3_000, 6_000, 8_000, 10_000, 12_000, 14_000, 16_000, 18_000, 20_000, 22_000, 24_000, 26_000, 28_000, 30_000, 32_000, 34_000, 36_000, 38_000, 40_000, 42_000, 44_000, 46_000, 48_000, 50_000, 52_000, 54_000, 56_000, 58_000, 60_000])
-
     # Number of training steps
     max_steps: int = 10_000
     # Steps to save the model
@@ -123,8 +114,7 @@ class Config:
     # Steps to evaluate the model
     eval_steps: List[int] = field(default_factory=lambda: [10_000])
     # Steps to fix the artifacts
-    fix_steps: List[int] = field(default_factory=lambda: [])
-    
+    fix_steps: List[int] = field(default_factory=lambda: [5000])
 
     # Initialization strategy
     init_type: str = "sfm"
@@ -347,7 +337,7 @@ class Runner:
             data_dir=cfg.data_dir,
             factor=cfg.data_factor,
             normalize=cfg.normalize_world_space,
-            test_every=cfg.test_every,
+            test_fraction=cfg.test_fraction,
         )
         self.trainset = Dataset(
             self.parser,
@@ -675,6 +665,7 @@ class Runner:
                 render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                 masks=masks,
             )
+
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
             else:
@@ -901,26 +892,62 @@ class Runner:
     def fix(self, step: int):
         print("Running fixer...")
 
-        if self.parser.test_every == 0:
-            # indices = trainset.indices = valset.indices
+        if self.parser.test_fraction == 1:
+            # all poses are both in trainset as well as the validation set
+            # Hence we create additional novel poses by interpolating between the training poses
             novel_poses = generate_interpolated_path(self.parser.camtoworlds, 1)
             novel_poses = np.concatenate([novel_poses, 
                                           np.repeat(np.array([[[0.0, 0.0, 0.0, 1.0]]]), len(novel_poses), axis=0),],
                                         axis=1,)
         elif len(self.cfg.fix_steps) == 1:
+            # If number of fix_steps is 1, directly use the target poses (validation set) as novel poses
             novel_poses = self.parser.camtoworlds[self.valset.indices]
         else:
             novel_poses = self.interpolator.shift_poses(self.current_novel_poses, self.parser.camtoworlds[self.valset.indices], distance=0.5)
 
-        self.render_traj(step, novel_poses)
-        image_paths = [f"{self.render_dir}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
+        print(f"Created {len(novel_poses)} novel poses...")
+        print(f"Rendering novel views...")
+        
+        camtoworlds_all = torch.from_numpy(novel_poses).float().to(self.device)
+        K = torch.from_numpy(list(self.parser.Ks_dict.values())[0]).float().to(self.device)
+        width, height = list(self.parser.imsize_dict.values())[0]
 
-        if len(self.novelloaders) == 0:
-            ref_image_indices = self.interpolator.find_nearest_assignments(self.parser.camtoworlds[self.trainset.indices], novel_poses)
-            ref_image_paths = [self.parser.image_paths[i] for i in np.array(self.trainset.indices)[ref_image_indices]]
-        else:
-            ref_image_indices = self.interpolator.find_nearest_assignments(self.parser.camtoworlds[self.trainset.indices], novel_poses)
-            ref_image_paths = [self.parser.image_paths[i] for i in np.array(self.trainset.indices)[ref_image_indices]]
+        image_paths = [f"{self.render_dir}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
+        alphas_paths = [f"{self.render_dir}/novel/{step}/Alpha/{i:04d}.png" for i in range(len(novel_poses))]
+
+        for i in tqdm.trange(0, len(camtoworlds_all), desc="Rendering trajectory"):
+            camtoworlds = camtoworlds_all[i:i+1]  # [1, 4, 4]
+            Ks = K[None].repeat(camtoworlds.shape[0], 1, 1)
+
+            renders, alphas, _ = self.rasterize_splats(
+                camtoworlds=camtoworlds,
+                Ks=Ks,
+                width=width,
+                height=height,
+                sh_degree=cfg.sh_degree,
+                near_plane=cfg.near_plane,
+                far_plane=cfg.far_plane,
+                render_mode="RGB+ED",
+            )  # [1, H, W, 4]
+
+            colors = torch.clamp(renders[0, ..., 0:3], 0.0, 1.0)  # [H, W, 3]
+            depths = renders[0, ..., 3:4]  # [H, W, 1]
+            depths = (depths - depths.min()) / (depths.max() - depths.min()) # NOT doing anything with depth for now
+                
+            colors_path = image_paths[i]
+            os.makedirs(os.path.dirname(colors_path), exist_ok=True)
+            colors_canvas = colors.cpu().numpy()
+            colors_canvas = (colors_canvas * 255).astype(np.uint8)
+            imageio.imwrite(colors_path, colors_canvas)
+            
+            alphas_path = alphas_paths[i]
+            os.makedirs(os.path.dirname(alphas_path), exist_ok=True)
+            alphas_canvas = alphas[0].float().cpu().numpy()
+            alphas_canvas = (alphas_canvas * 255).astype(np.uint8)
+            Image.fromarray(alphas_canvas.squeeze(), mode='L').save(alphas_path)
+        
+        ref_image_indices = self.interpolator.find_nearest_assignments(self.parser.camtoworlds[self.trainset.indices], novel_poses)
+        ref_image_paths = [self.parser.image_paths[i] for i in np.array(self.trainset.indices)[ref_image_indices]]
         assert len(image_paths) == len(ref_image_paths) == len(novel_poses)
 
         for i in tqdm.trange(0, len(novel_poses), desc="Fixing artifacts..."):
@@ -941,7 +968,7 @@ class Runner:
                 ref_image.save(f"{self.render_dir}/novel/{step}/Ref/{i:04d}.png")
             
         parser = deepcopy(self.parser)
-        parser.test_every = 0
+        parser.test_fraction = 0 # use all the novel images for training, no testing
         parser.image_paths = [f"{self.render_dir}/novel/{step}/Fixed/{i:04d}.png" for i in range(len(novel_poses))]
         parser.image_names = [os.path.basename(p) for p in parser.image_paths]
         parser.alpha_mask_paths = [f"{self.render_dir}/novel/{step}/Alpha/{i:04d}.png" for i in range(len(novel_poses))]
@@ -978,7 +1005,7 @@ class Runner:
         ellipse_time = 0
         metrics = defaultdict(list)
         for i, data in enumerate(tqdm.tqdm(valloader)):
-            camtoworlds = data["camtoworld"].to(device)
+            camtoworlds = data["camtoworld"].to(device)  # [1, 4, 4]
             Ks = data["K"].to(device)
             pixels = data["image"].to(device) / 255.0
             masks = data["mask"].to(device) if "mask" in data else None
@@ -1054,83 +1081,6 @@ class Runner:
             for k, v in stats.items():
                 self.writer.add_scalar(f"{stage}/{k}", v, step)
             self.writer.flush()
-
-    @torch.no_grad()
-    def render_traj(self, step: int, camtoworlds_all=None, batch_size=8, tag="novel"):
-        """Entry for trajectory rendering."""
-        print("Running trajectory rendering...")
-        cfg = self.cfg
-        device = self.device
-
-        # we generate a trajectory only if camtoworlds_all is not provided. 
-        if camtoworlds_all is None:
-            camtoworlds_all = self.parser.camtoworlds[5:-5]
-            if cfg.render_traj_path == "interp":
-                camtoworlds_all = generate_interpolated_path(
-                    camtoworlds_all, 1
-                )  # [N, 3, 4]
-            elif cfg.render_traj_path == "ellipse":
-                height = camtoworlds_all[:, 2, 3].mean()
-                camtoworlds_all = generate_ellipse_path_z(
-                    camtoworlds_all, height=height
-                )  # [N, 3, 4]
-            elif cfg.render_traj_path == "spiral":
-                camtoworlds_all = generate_spiral_path(
-                    camtoworlds_all,
-                    bounds=self.parser.bounds * self.scene_scale,
-                    spiral_scale_r=self.parser.extconf["spiral_radius_scale"],
-                )
-            else:
-                raise ValueError(
-                    f"Render trajectory type not supported: {cfg.render_traj_path}"
-                )
-
-            camtoworlds_all = np.concatenate(
-                [
-                    camtoworlds_all,
-                    np.repeat(
-                        np.array([[[0.0, 0.0, 0.0, 1.0]]]), len(camtoworlds_all), axis=0
-                    ),
-                ],
-                axis=1,
-            )  # [N, 4, 4]
-
-        camtoworlds_all = torch.from_numpy(camtoworlds_all).float().to(device)
-        K = torch.from_numpy(list(self.parser.Ks_dict.values())[0]).float().to(device)
-        width, height = list(self.parser.imsize_dict.values())[0]
-
-        for i in tqdm.trange(0, len(camtoworlds_all), batch_size, desc="Rendering trajectory"):
-            camtoworlds = camtoworlds_all[i : i + batch_size]
-            Ks = K[None].repeat(camtoworlds.shape[0], 1, 1)
-
-            renders, alphas, _ = self.rasterize_splats(
-                camtoworlds=camtoworlds,
-                Ks=Ks,
-                width=width,
-                height=height,
-                sh_degree=cfg.sh_degree,
-                near_plane=cfg.near_plane,
-                far_plane=cfg.far_plane,
-                render_mode="RGB+ED",
-            )  # [B, H, W, 4]
-
-            for j in range(renders.shape[0]):
-                colors = torch.clamp(renders[j, ..., 0:3], 0.0, 1.0)  # [H, W, 3]
-                depths = renders[j, ..., 3:4]  # [H, W, 1]
-                depths = (depths - depths.min()) / (depths.max() - depths.min())
-                
-                idx = i + j
-                colors_path = f"{self.render_dir}/{tag}/{step}/Pred/{idx:04d}.png"
-                os.makedirs(os.path.dirname(colors_path), exist_ok=True)
-                colors_canvas = colors.cpu().numpy()
-                colors_canvas = (colors_canvas * 255).astype(np.uint8)
-                imageio.imwrite(colors_path, colors_canvas)
-                
-                alphas_path = f"{self.render_dir}/{tag}/{step}/Alpha/{idx:04d}.png"
-                os.makedirs(os.path.dirname(alphas_path), exist_ok=True)
-                alphas_canvas = alphas[j].float().cpu().numpy()
-                alphas_canvas = (alphas_canvas * 255).astype(np.uint8)
-                Image.fromarray(alphas_canvas.squeeze(), mode='L').save(alphas_path)
 
     @torch.no_grad()
     def run_compression(self, step: int):
