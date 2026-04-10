@@ -355,6 +355,7 @@ class Dataset:
             frac = Fraction(self.parser.test_fraction).limit_denominator()
             block_size = frac.denominator
             n_train_block = block_size - frac.numerator
+            # n_test_block = frac.numerator
             
             i = 0
             self.indices = []
@@ -368,6 +369,14 @@ class Dataset:
                 else:  # split == "test"
                     test_start = min(start + n_train_block, end)
                     self.indices.extend(indices[test_start:end])
+                
+                # if split != "train": # "test" or "val"
+                #     test_end = min(start + n_test_block, end)
+                #     self.indices.extend(indices[start:test_end])
+                # else:  # split == "train"
+                #     train_start = min(start + n_test_block, end)
+                #     self.indices.extend(indices[train_start:end])
+                
                 i += block_size
 
     def __len__(self):
