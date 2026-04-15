@@ -36,8 +36,6 @@ from datasets.traj import (
     generate_ellipse_path_z,
     generate_spiral_path,
 )
-from filters import gs_like_corruption
-
 
 from lib_bilagrid import (
     BilateralGrid,
@@ -117,11 +115,11 @@ class Config:
     # fix_steps: List[int] = field(default_factory=lambda: [3_000, 6_000, 8_000, 10_000, 12_000, 14_000, 16_000, 18_000, 20_000, 22_000, 24_000, 26_000, 28_000, 30_000, 32_000, 34_000, 36_000, 38_000, 40_000, 42_000, 44_000, 46_000, 48_000, 50_000, 52_000, 54_000, 56_000, 58_000, 60_000])
 
     # Number of training steps
-    max_steps: int = 10_000
+    max_steps: int = 7_000
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [10_000])
+    save_steps: List[int] = field(default_factory=lambda: [])
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [10_000])
+    eval_steps: List[int] = field(default_factory=lambda: [])
     # Steps to fix the artifacts
     fix_steps: List[int] = field(default_factory=lambda: [])
     
@@ -501,10 +499,6 @@ class Runner:
         self.difix.set_progress_bar_config(disable=True)
         self.difix.to("cuda")
 
-        # Corrupt Fixed images
-        self.corruption_ratio = 0.5
-        self.corrupt_indices = np.random.choice(len(self.trainset.indices), int(self.corruption_ratio * len(self.trainset.indices)), replace=False)
-
     def rasterize_splats(
         self,
         camtoworlds: Tensor,
@@ -875,7 +869,7 @@ class Runner:
                 assert_never(self.cfg.strategy)
 
             # eval the full set
-            if step in [i - 1 for i in cfg.eval_steps]:
+            if step in [i - 1 for i in cfg.eval_steps] or step == max_steps - 1: 
                 self.eval(step)
 
             # run fixer
@@ -930,9 +924,6 @@ class Runner:
             output_image = self.difix(prompt="remove degradation", image=image, ref_image=ref_image, num_inference_steps=1, timesteps=[199], guidance_scale=0.0).images[0]
             output_image = output_image.resize(image.size, Image.LANCZOS)
 
-            if i in self.corrupt_indices:
-                # add corruption to the fixed image
-                output_image = gs_like_corruption(output_image)
 
             os.makedirs(f"{self.render_dir}/novel/{step}/Fixed", exist_ok=True)
             output_image.save(f"{self.render_dir}/novel/{step}/Fixed/{i:04d}.png")
