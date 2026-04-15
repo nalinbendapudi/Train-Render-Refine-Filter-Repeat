@@ -629,7 +629,8 @@ class Runner:
                 self.viewer.lock.acquire()
                 tic = time.time()
 
-            train_novel_ratio = len(trainloader.dataset) / len(self.novelloaders[-1].dataset) if len(self.novelloaders) > 0 else 1.0
+            # train_novel_ratio = len(trainloader.dataset) / len(self.novelloaders[-1].dataset) if len(self.novelloaders) > 0 else 1.0
+            train_novel_ratio = 0.7
 
             if random.random() < train_novel_ratio:
                 try:
@@ -756,11 +757,10 @@ class Runner:
                     + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
                 )
 
-            # 
-            # if is_novel_data:
-            #     loss = loss * cfg.novel_data_lambda
-            # else:
-            #     loss = loss * 1.5
+            if is_novel_data:
+                loss = loss * cfg.novel_data_lambda
+            else:
+                loss = loss * 1.5
             loss.backward()
 
             desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "
@@ -928,7 +928,7 @@ class Runner:
         
         if self.cfg.novel_views_path is not None:
             print(f"Using rendered and fixed views from {self.cfg.novel_views_path}...")
-            novel_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
+            pred_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
             fixed_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Fixed/{i:04d}.png" for i in range(len(novel_poses))]
             alpha_mask_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Alpha/{i:04d}.png" for i in range(len(novel_poses))]
 
@@ -1007,7 +1007,7 @@ class Runner:
                     os.makedirs(f"{self.render_dir}/novel/{step}/Ref", exist_ok=True)
                     ref_image.save(f"{self.render_dir}/novel/{step}/Ref/{i:04d}.png")
                 
-                novel_image_paths = [f"{self.render_dir}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
+                pred_image_paths = [f"{self.render_dir}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
                 fixed_image_paths = [f"{self.render_dir}/novel/{step}/Fixed/{i:04d}.png" for i in range(len(novel_poses))]
                 alpha_mask_paths = [f"{self.render_dir}/novel/{step}/Alpha/{i:04d}.png" for i in range(len(novel_poses))]
 
@@ -1015,7 +1015,7 @@ class Runner:
             print("No filtering - using all novel fixed images for training.")    
             parser = deepcopy(self.parser)
             parser.test_fraction = 0 # use all the novel images for training, no testing
-            parser.image_paths = novel_image_paths
+            parser.image_paths = pred_image_paths
             parser.image_names = [os.path.basename(p) for p in parser.image_paths]
             parser.alpha_mask_paths = alpha_mask_paths
             parser.camtoworlds = novel_poses
@@ -1028,7 +1028,7 @@ class Runner:
             print("Filtering with known corruption - using only the fixed images without corruption for training.")
             parser = deepcopy(self.parser)
             parser.test_fraction = 0 # use all the novel images for training, no testing
-            parser.image_paths = [novel_image_paths[i] for i in range(len(novel_poses)) if i not in corrupt_indices]
+            parser.image_paths = [pred_image_paths[i] for i in range(len(novel_poses)) if i not in corrupt_indices]
             parser.image_names = [os.path.basename(p) for p in parser.image_paths]
             parser.alpha_mask_paths = [alpha_mask_paths[i] for i in range(len(novel_poses)) if i not in corrupt_indices]
             parser.camtoworlds = novel_poses[[i for i in range(len(novel_poses)) if i not in corrupt_indices]]
