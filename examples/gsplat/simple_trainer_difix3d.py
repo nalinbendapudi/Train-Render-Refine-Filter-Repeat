@@ -78,6 +78,7 @@ class Config:
     result_dir: str = "results/garden"
     # Every N images there is a test image
     test_fraction: float = 0.9
+    
     # Random crop size for training  (experimental)
     patch_size: Optional[int] = None
     # A global scaler that applies to the scene size related parameters
@@ -211,12 +212,14 @@ class Config:
     # Path to novel and fixed views
     novel_views_path: Optional[str] = None
 
-    # Corrupt Fixed images
+    # Artificial Corruption
     corruption_ratio: float = 0.0
     rng = np.random.default_rng(42)
 
     # Filters
     filter_name: Optional[str] = None
+
+    render_only: bool = False
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -630,7 +633,7 @@ class Runner:
                 tic = time.time()
 
             # train_novel_ratio = len(trainloader.dataset) / len(self.novelloaders[-1].dataset) if len(self.novelloaders) > 0 else 1.0
-            train_novel_ratio = 0.7
+            train_novel_ratio = 0.7  if len(self.novelloaders) > 0 else 1.0
 
             if random.random() < train_novel_ratio:
                 try:
@@ -923,24 +926,37 @@ class Runner:
             novel_poses = self.parser.camtoworlds[self.valset.indices]
         else:
             novel_poses = self.interpolator.shift_poses(self.current_novel_poses, self.parser.camtoworlds[self.valset.indices], distance=0.5)
-
         print(f"Created {len(novel_poses)} novel poses...")
         
+        num_corrupt = 0
+        corrupt_indices = []
+
+
         if self.cfg.novel_views_path is not None:
             print(f"Using rendered and fixed views from {self.cfg.novel_views_path}...")
             pred_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
-            fixed_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Fixed/{i:04d}.png" for i in range(len(novel_poses))]
             alpha_mask_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Alpha/{i:04d}.png" for i in range(len(novel_poses))]
-
+            fixed_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Fixed/{i:04d}.png" for i in range(len(novel_poses))]
+            ref_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Ref/{i:04d}.png" for i in range(len(novel_poses))]
+            pred_and_corrupted_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Pred_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
+            fixed_and_corrupted_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Fixed_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
+            
         else:
+            pred_image_paths = [f"{self.render_dir}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
+            alpha_mask_paths = [f"{self.render_dir}/novel/{step}/Alpha/{i:04d}.png" for i in range(len(novel_poses))]
+            fixed_image_paths = [f"{self.render_dir}/novel/{step}/Fixed/{i:04d}.png" for i in range(len(novel_poses))]
+            ref_image_paths = [f"{self.render_dir}/novel/{step}/Ref/{i:04d}.png" for i in range(len(novel_poses))]
+            pred_and_corrupted_image_paths = [f"{self.render_dir}/novel/{step}/Pred_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
+            fixed_and_corrupted_image_paths = [f"{self.render_dir}/novel/{step}/Fixed_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
+            
 
-            print(f"Rendering novel views...")
+            # Render novel views with the current model
             camtoworlds_all = torch.from_numpy(novel_poses).float().to(self.device)
             K = torch.from_numpy(list(self.parser.Ks_dict.values())[0]).float().to(self.device)
             width, height = list(self.parser.imsize_dict.values())[0]
 
-            image_paths = [f"{self.render_dir}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
-            alphas_paths = [f"{self.render_dir}/novel/{step}/Alpha/{i:04d}.png" for i in range(len(novel_poses))]
+            os.makedirs(f"{self.render_dir}/novel/{step}/Pred", exist_ok=True)
+            os.makedirs(f"{self.render_dir}/novel/{step}/Alpha", exist_ok=True)
 
             for i in tqdm.trange(0, len(camtoworlds_all), desc="Rendering trajectory"):
                 camtoworlds = camtoworlds_all[i:i+1]  # [1, 4, 4]
@@ -961,83 +977,93 @@ class Runner:
                 depths = renders[0, ..., 3:4]  # [H, W, 1]
                 depths = (depths - depths.min()) / (depths.max() - depths.min()) # NOT doing anything with depth for now
                     
-                colors_path = image_paths[i]
-                os.makedirs(os.path.dirname(colors_path), exist_ok=True)
                 colors_canvas = colors.cpu().numpy()
                 colors_canvas = (colors_canvas * 255).astype(np.uint8)
-                imageio.imwrite(colors_path, colors_canvas)
+                imageio.imwrite(pred_image_paths[i], colors_canvas)
                 
-                alphas_path = alphas_paths[i]
-                os.makedirs(os.path.dirname(alphas_path), exist_ok=True)
                 alphas_canvas = alphas[0].float().cpu().numpy()
                 alphas_canvas = (alphas_canvas * 255).astype(np.uint8)
-                Image.fromarray(alphas_canvas.squeeze(), mode='L').save(alphas_path)
+                Image.fromarray(alphas_canvas.squeeze(), mode='L').save(alpha_mask_paths[i])
             
-            ref_image_indices = self.interpolator.find_nearest_assignments(self.parser.camtoworlds[self.trainset.indices], novel_poses)
-            ref_image_paths = [self.parser.image_paths[i] for i in np.array(self.trainset.indices)[ref_image_indices]]
-            assert len(image_paths) == len(ref_image_paths) == len(novel_poses)
 
+            # Fix artifacts with difix
+            if not self.cfg.render_only:
+                
+                os.makedirs(f"{self.render_dir}/novel/{step}/Fixed", exist_ok=True)
+                os.makedirs(f"{self.render_dir}/novel/{step}/Ref", exist_ok=True)
+
+                ref_image_indices = self.interpolator.find_nearest_assignments(self.parser.camtoworlds[self.trainset.indices], novel_poses)
+                ref_image_paths = [self.parser.image_paths[i] for i in np.array(self.trainset.indices)[ref_image_indices]]
+                assert len(pred_image_paths) == len(ref_image_paths) == len(novel_poses)
+
+                for i in tqdm.trange(0, len(novel_poses), desc="Fixing artifacts..."):
+                    image = Image.open(pred_image_paths[i]).convert("RGB")
+                    ref_image = Image.open(ref_image_paths[i]).convert("RGB")
+                    ref_image = ref_image.resize(image.size, Image.LANCZOS)
+                    if ref_image is not None:
+                        ref_image.save(ref_image_paths[i])
+                    
+                    fixed_image = self.difix(prompt="remove degradation", image=image, ref_image=ref_image, num_inference_steps=1, timesteps=[199], guidance_scale=0.0).images[0]
+                    fixed_image = fixed_image.resize(image.size, Image.LANCZOS)
+                    fixed_image.save(fixed_image_paths[i])    
+
+
+            # Add corruption to a portion of the images, if specified in the config
             if self.cfg.corruption_ratio > 0.0:
                 num_corrupt = int(len(novel_poses) * self.cfg.corruption_ratio)
                 corrupt_indices = self.cfg.rng.choice(len(novel_poses), size=num_corrupt, replace=False)
-            else:
-                num_corrupt = 0
-                corrupt_indices = []
-            print(f"Adding corruption to {num_corrupt} out of {len(novel_poses)} fixed images...")
-            print(f"Corrupt indices: {sorted(corrupt_indices)}")
+                print(f"Adding corruption to {num_corrupt} out of {len(novel_poses)} images...")
+                print(f"Corrupt indices: {sorted(corrupt_indices)}")
+                os.makedirs(f"{self.render_dir}/novel/{step}/Pred_and_Corrupted", exist_ok=True)
+                os.makedirs(f"{self.render_dir}/novel/{step}/Fixed_and_Corrupted", exist_ok=True)    
 
-            for i in tqdm.trange(0, len(novel_poses), desc="Fixing artifacts..."):
-                image = Image.open(image_paths[i]).convert("RGB")
-                ref_image = Image.open(ref_image_paths[i]).convert("RGB")
-                ref_image = ref_image.resize(image.size, Image.LANCZOS)
-                output_image = self.difix(prompt="remove degradation", image=image, ref_image=ref_image, num_inference_steps=1, timesteps=[199], guidance_scale=0.0).images[0]
-                output_image = output_image.resize(image.size, Image.LANCZOS)
-
-                if self.cfg.corruption_ratio > 0.0:
-                    os.makedirs(f"{self.render_dir}/novel/{step}/Fixed_before_corruption", exist_ok=True)
-                    output_image.save(f"{self.render_dir}/novel/{step}/Fixed_before_corruption/{i:04d}.png")
+                for i in tqdm.trange(0, len(novel_poses), desc="Adding corruption..."):
+                    pred_image = Image.open(pred_image_paths[i]).convert("RGB")
+                    fixed_image = Image.open(fixed_image_paths[i]).convert("RGB")
                     if i in corrupt_indices:
-                        # add corruption to the fixed image
-                        output_image = gs_like_corruption(output_image, np.random.default_rng(i))
+                        pred_and_corrupted_image = gs_like_corruption(pred_image, np.random.default_rng(i))
+                        fixed_and_corrupted_image = gs_like_corruption(fixed_image, np.random.default_rng(i))
+                    else:
+                        pred_and_corrupted_image = pred_image
+                        fixed_and_corrupted_image = fixed_image
+                    pred_and_corrupted_image.save(pred_and_corrupted_image_paths[i])
+                    fixed_and_corrupted_image.save(fixed_and_corrupted_image_paths[i])
 
-                os.makedirs(f"{self.render_dir}/novel/{step}/Fixed", exist_ok=True)
-                output_image.save(f"{self.render_dir}/novel/{step}/Fixed/{i:04d}.png")
-                
-                if ref_image is not None:
-                    os.makedirs(f"{self.render_dir}/novel/{step}/Ref", exist_ok=True)
-                    ref_image.save(f"{self.render_dir}/novel/{step}/Ref/{i:04d}.png")
-                
-                pred_image_paths = [f"{self.render_dir}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
-                fixed_image_paths = [f"{self.render_dir}/novel/{step}/Fixed/{i:04d}.png" for i in range(len(novel_poses))]
-                alpha_mask_paths = [f"{self.render_dir}/novel/{step}/Alpha/{i:04d}.png" for i in range(len(novel_poses))]
+        # Preparing images for retraining
+        if self.cfg.corruption_ratio <= 0.0:
+            if self.cfg.render_only:
+                print("Using (uncorrupted) rendered views for retraining.")
+                image_paths = pred_image_paths
+            else:
+                print("Using (uncorrupted) fixed views for retraining.")
+                image_paths = fixed_image_paths
+        else:
+            if self.cfg.render_only:
+                print("Using corrupted rendered views for retraining.")
+                image_paths = pred_and_corrupted_image_paths
+            else:
+                print("Using corrupted fixed views for retraining.")
+                image_paths = fixed_and_corrupted_image_paths
+        
 
+        # Filtering images before adding to the training set
         if self.cfg.filter_name is None:
-            print("No filtering - using all novel fixed images for training.")    
-            parser = deepcopy(self.parser)
-            parser.test_fraction = 0 # use all the novel images for training, no testing
-            parser.image_paths = pred_image_paths
-            parser.image_names = [os.path.basename(p) for p in parser.image_paths]
-            parser.alpha_mask_paths = alpha_mask_paths
-            parser.camtoworlds = novel_poses
-            parser.camera_ids = [parser.camera_ids[0]] * len(novel_poses)
-            print(f"Adding {len(parser.image_paths)} fixed images to novel dataset...")
-        
+            print("No filtering - using all novel images for training.")    
+            filtered_indices = list(range(len(novel_poses)))
         elif self.cfg.filter_name == "known_corruption":
-            num_corrupt = int(len(novel_poses) * self.cfg.corruption_ratio)
-            corrupt_indices = self.cfg.rng.choice(len(novel_poses), size=num_corrupt, replace=False)
-            print("Filtering with known corruption - using only the fixed images without corruption for training.")
-            parser = deepcopy(self.parser)
-            parser.test_fraction = 0 # use all the novel images for training, no testing
-            parser.image_paths = [pred_image_paths[i] for i in range(len(novel_poses)) if i not in corrupt_indices]
-            parser.image_names = [os.path.basename(p) for p in parser.image_paths]
-            parser.alpha_mask_paths = [alpha_mask_paths[i] for i in range(len(novel_poses)) if i not in corrupt_indices]
-            parser.camtoworlds = novel_poses[[i for i in range(len(novel_poses)) if i not in corrupt_indices]]
-            parser.camera_ids = [parser.camera_ids[0]] * len(parser.image_paths)
-            print(f"Filtering out {num_corrupt} corrupted images. Adding {len(parser.image_paths)} fixed images to novel dataset...")
-        
+            print("Filtering with known corruption - using only the images without known corruption for training.")
+            filtered_indices = [i for i in range(len(novel_poses)) if i not in corrupt_indices]
         else:
             raise ValueError(f"Unknown filter name: {self.cfg.filter_name}")
         
+        # Adding images to the training set
+        parser = deepcopy(self.parser)
+        parser.test_fraction = 0 # use all the novel images for training, no testing
+        parser.image_paths = [image_paths[i] for i in filtered_indices]
+        parser.image_names = [os.path.basename(p) for p in parser.image_paths]
+        parser.alpha_mask_paths = [alpha_mask_paths[i] for i in filtered_indices]
+        parser.camtoworlds = novel_poses[[i for i in filtered_indices]]
+        parser.camera_ids = [parser.camera_ids[0]] * len(parser.image_paths)
         dataset = Dataset(parser, split="train")
         dataloader = torch.utils.data.DataLoader(
             dataset,
