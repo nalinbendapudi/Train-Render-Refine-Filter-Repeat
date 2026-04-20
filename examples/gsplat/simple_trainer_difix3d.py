@@ -117,19 +117,12 @@ class Config:
     # Steps to fix the artifacts
     fix_steps: List[int] = field(default_factory=lambda: [5_000])
 
-    # # Number of training steps
-    # max_steps: int = 7_000
-    # # Steps to save the model
-    # save_steps: List[int] = field(default_factory=lambda: [7_000])
-    # # Steps to evaluate the model
-    # eval_steps: List[int] = field(default_factory=lambda: [7_000])
-    # # Steps to fix the artifacts
-    # fix_steps: List[int] = field(default_factory=lambda: [])
-
 
     # Initialization strategy
-    init_type: str = "sfm"
+    # init_type: str = "sfm"
     # init_type: str = "random"
+    init_type: str = "mono_depth"
+
     
     # Initial number of GSs. Ignored if using sfm
     init_num_pts: int = 100_000
@@ -264,6 +257,8 @@ def create_splats_with_optimizers(
     elif init_type == "random":
         points = init_extent * scene_scale * (torch.rand((init_num_pts, 3)) * 2 - 1)
         rgbs = torch.rand((init_num_pts, 3))
+    elif init_type == "mono_depth":
+        points, rgbs = init_from_mono_depth(parser)
     else:
         raise ValueError("Please specify a correct init_type: sfm or random")
 
@@ -632,8 +627,8 @@ class Runner:
                 self.viewer.lock.acquire()
                 tic = time.time()
 
-            # train_novel_ratio = len(trainloader.dataset) / len(self.novelloaders[-1].dataset) if len(self.novelloaders) > 0 else 1.0
-            train_novel_ratio = 0.7  if len(self.novelloaders) > 0 else 1.0
+            train_novel_ratio = len(trainloader.dataset) / len(self.novelloaders[-1].dataset) if len(self.novelloaders) > 0 else 1.0
+            # train_novel_ratio = 0.7  if len(self.novelloaders) > 0 else 1.0
 
             if random.random() < train_novel_ratio:
                 try:
@@ -706,9 +701,9 @@ class Runner:
                 bkgd = torch.rand(1, 3, device=device)
                 colors = colors + bkgd * (1.0 - alphas)
 
-            if is_novel_data and alpha_masks is not None:
-                colors = colors * (alpha_masks > 0.5).float()
-                pixels = pixels * (alpha_masks > 0.5).float()
+            # if is_novel_data and alpha_masks is not None:
+            #     colors = colors * (alpha_masks > 0.5).float()
+            #     pixels = pixels * (alpha_masks > 0.5).float()
 
             self.cfg.strategy.step_pre_backward(
                 params=self.splats,
@@ -724,6 +719,7 @@ class Runner:
                 colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
             )
             loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+            
             if cfg.depth_loss:
                 # query depths from depth map
                 points = torch.stack(
@@ -743,6 +739,7 @@ class Runner:
                 disp_gt = 1.0 / depths_gt  # [1, M]
                 depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
                 loss += depthloss * cfg.depth_lambda
+            
             if cfg.use_bilateral_grid:
                 tvloss = 10 * total_variation_loss(self.bil_grids.grids)
                 loss += tvloss
@@ -760,10 +757,12 @@ class Runner:
                     + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
                 )
 
-            if is_novel_data:
-                loss = loss * cfg.novel_data_lambda
-            else:
-                loss = loss * 1.5
+            # if is_novel_data:
+            #     loss = loss * cfg.novel_data_lambda
+            # else:
+            #     loss = loss * 1.5
+
+
             loss.backward()
 
             desc = f"loss={loss.item():.3f}| " f"sh degree={sh_degree_to_use}| "

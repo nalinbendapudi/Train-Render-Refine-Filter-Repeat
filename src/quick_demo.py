@@ -37,7 +37,11 @@ def main():
 
     pipe = DifixPipeline.from_pretrained("nvidia/difix_ref", trust_remote_code=True)
     pipe.to("cuda")
-        
+    
+    print(pipe.__class__)
+    print(pipe.__class__.__name__)
+    print(pipe.__class__.__module__)
+
     output_image = pipe(prompt, image=input_image, ref_image=ref_image, num_inference_steps=1, timesteps=[199], guidance_scale=0.0).images[0]
     output_image.save(str(output_using_ref_path))
     
