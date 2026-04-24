@@ -37,6 +37,7 @@ from datasets.traj import (
     generate_spiral_path,
 )
 from filters import gs_like_corruption
+from mono_depth import init_from_mono_depth
 
 
 from lib_bilagrid import (
@@ -119,9 +120,9 @@ class Config:
 
 
     # Initialization strategy
-    # init_type: str = "sfm"
+    init_type: str = "sfm"
     # init_type: str = "random"
-    init_type: str = "mono_depth"
+    # init_type: str = "mono_depth"
 
     
     # Initial number of GSs. Ignored if using sfm
@@ -236,6 +237,7 @@ class Config:
 
 def create_splats_with_optimizers(
     parser: Parser,
+    trainset: Dataset,
     init_type: str = "sfm",
     init_num_pts: int = 100_000,
     init_extent: float = 3.0,
@@ -258,9 +260,14 @@ def create_splats_with_optimizers(
         points = init_extent * scene_scale * (torch.rand((init_num_pts, 3)) * 2 - 1)
         rgbs = torch.rand((init_num_pts, 3))
     elif init_type == "mono_depth":
-        points, rgbs = init_from_mono_depth(parser)
+        points, rgbs = init_from_mono_depth(parser, trainset)
+        points = points * scene_scale * init_extent
+        if len(points) > init_num_pts:
+            idx = torch.randperm(len(points))[:init_num_pts]
+            points = points[idx]
+            rgbs = rgbs[idx]
     else:
-        raise ValueError("Please specify a correct init_type: sfm or random")
+        raise ValueError("Please specify a correct init_type: sfm or random or mono_depth.")
 
     # Initialize the GS size to be the average dist of the 3 nearest neighbors
     dist2_avg = (knn(points, 4)[:, 1:] ** 2).mean(dim=-1)  # [N,]
@@ -374,6 +381,7 @@ class Runner:
         feature_dim = 32 if cfg.app_opt else None
         self.splats, self.optimizers = create_splats_with_optimizers(
             self.parser,
+            self.trainset,
             init_type=cfg.init_type,
             init_num_pts=cfg.init_num_pts,
             init_extent=cfg.init_extent,
@@ -627,8 +635,8 @@ class Runner:
                 self.viewer.lock.acquire()
                 tic = time.time()
 
-            train_novel_ratio = len(trainloader.dataset) / len(self.novelloaders[-1].dataset) if len(self.novelloaders) > 0 else 1.0
-            # train_novel_ratio = 0.7  if len(self.novelloaders) > 0 else 1.0
+            # train_novel_ratio = len(trainloader.dataset) / len(self.novelloaders[-1].dataset) if len(self.novelloaders) > 0 else 1.0
+            train_novel_ratio = 0.7  if len(self.novelloaders) > 0 else 1.0
 
             if random.random() < train_novel_ratio:
                 try:
@@ -701,9 +709,9 @@ class Runner:
                 bkgd = torch.rand(1, 3, device=device)
                 colors = colors + bkgd * (1.0 - alphas)
 
-            # if is_novel_data and alpha_masks is not None:
-            #     colors = colors * (alpha_masks > 0.5).float()
-            #     pixels = pixels * (alpha_masks > 0.5).float()
+            if is_novel_data and alpha_masks is not None:
+                colors = colors * (alpha_masks > 0.5).float()
+                pixels = pixels * (alpha_masks > 0.5).float()
 
             self.cfg.strategy.step_pre_backward(
                 params=self.splats,
@@ -757,10 +765,10 @@ class Runner:
                     + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
                 )
 
-            # if is_novel_data:
-            #     loss = loss * cfg.novel_data_lambda
-            # else:
-            #     loss = loss * 1.5
+            if is_novel_data:
+                loss = loss * cfg.novel_data_lambda
+            else:
+                loss = loss * 1.5
 
 
             loss.backward()
