@@ -213,7 +213,10 @@ class Config:
     # Filters
     filter_name: Optional[str] = None
 
+    # No refining, only rendering for novel views
     render_only: bool = False
+    # Refining w/o reference
+    refine_wo_ref: bool = False
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -513,7 +516,10 @@ class Runner:
         self.novelloaders_iter = []
         
         # Diffusion fixer
-        self.difix = DifixPipeline.from_pretrained("nvidia/difix_ref", trust_remote_code=True)
+        if cfg.refine_wo_ref:
+            self.difix = DifixPipeline.from_pretrained("nvidia/difix", trust_remote_code=True)
+        else:
+            self.difix = DifixPipeline.from_pretrained("nvidia/difix_ref", trust_remote_code=True)
         self.difix.set_progress_bar_config(disable=True)
         self.difix.to("cuda")
         
@@ -635,8 +641,8 @@ class Runner:
                 self.viewer.lock.acquire()
                 tic = time.time()
 
-            # train_novel_ratio = len(trainloader.dataset) / len(self.novelloaders[-1].dataset) if len(self.novelloaders) > 0 else 1.0
-            train_novel_ratio = 0.7  if len(self.novelloaders) > 0 else 1.0
+            train_novel_ratio = len(trainloader.dataset) / len(self.novelloaders[-1].dataset) if len(self.novelloaders) > 0 else 1.0
+            # train_novel_ratio = 0.7  if len(self.novelloaders) > 0 else 1.0
 
             if random.random() < train_novel_ratio:
                 try:
@@ -765,11 +771,10 @@ class Runner:
                     + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
                 )
 
-            if is_novel_data:
-                loss = loss * cfg.novel_data_lambda
-            else:
-                loss = loss * 1.5
-
+            # if is_novel_data:
+            #     loss = loss * cfg.novel_data_lambda
+            # else:
+            #     loss = loss * 1.5
 
             loss.backward()
 
@@ -999,18 +1004,22 @@ class Runner:
                 os.makedirs(f"{self.render_dir}/novel/{step}/Fixed", exist_ok=True)
                 os.makedirs(f"{self.render_dir}/novel/{step}/Ref", exist_ok=True)
 
-                ref_image_indices = self.interpolator.find_nearest_assignments(self.parser.camtoworlds[self.trainset.indices], novel_poses)
-                ref_image_paths = [self.parser.image_paths[i] for i in np.array(self.trainset.indices)[ref_image_indices]]
-                assert len(pred_image_paths) == len(ref_image_paths) == len(novel_poses)
+                if not self.cfg.refine_wo_ref:
+                    ref_image_indices = self.interpolator.find_nearest_assignments(self.parser.camtoworlds[self.trainset.indices], novel_poses)
+                    ref_image_paths = [self.parser.image_paths[i] for i in np.array(self.trainset.indices)[ref_image_indices]]
+                    assert len(pred_image_paths) == len(ref_image_paths) == len(novel_poses)
 
                 for i in tqdm.trange(0, len(novel_poses), desc="Fixing artifacts..."):
                     image = Image.open(pred_image_paths[i]).convert("RGB")
-                    ref_image = Image.open(ref_image_paths[i]).convert("RGB")
-                    ref_image = ref_image.resize(image.size, Image.LANCZOS)
-                    if ref_image is not None:
-                        ref_image.save(ref_image_paths[i])
-                    
-                    fixed_image = self.difix(prompt="remove degradation", image=image, ref_image=ref_image, num_inference_steps=1, timesteps=[199], guidance_scale=0.0).images[0]
+                    ref_image = None
+                    if not self.cfg.refine_wo_ref:
+                        ref_image = Image.open(ref_image_paths[i]).convert("RGB")
+                        ref_image = ref_image.resize(image.size, Image.LANCZOS)
+                        if ref_image is not None:
+                            ref_image.save(ref_image_paths[i])
+                            fixed_image = self.difix(prompt="remove degradation", image=image, ref_image=ref_image, num_inference_steps=1, timesteps=[199], guidance_scale=0.0).images[0]                    
+                    if self.cfg.refine_wo_ref or ref_image is None:
+                        fixed_image = self.difix(prompt="remove degradation", image=image, num_inference_steps=1, timesteps=[199], guidance_scale=0.0).images[0]    
                     fixed_image = fixed_image.resize(image.size, Image.LANCZOS)
                     fixed_image.save(fixed_image_paths[i])    
 
