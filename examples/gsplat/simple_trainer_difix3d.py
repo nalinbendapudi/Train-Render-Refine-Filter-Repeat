@@ -1,3 +1,4 @@
+from html import parser
 import json
 import math
 import os
@@ -11,6 +12,7 @@ import random
 from copy import deepcopy
 
 from PIL import Image
+import cv2
 import imageio
 import nerfview
 import numpy as np
@@ -36,7 +38,8 @@ from datasets.traj import (
     generate_ellipse_path_z,
     generate_spiral_path,
 )
-from filters import gs_like_corruption
+from filters.artificial_noise import gs_like_corruption
+from filters.sfm_reproj_filter import should_discard_refined_photometric
 from mono_depth import init_from_mono_depth
 
 
@@ -212,7 +215,7 @@ class Config:
 
     # Filters
     filter_name: Optional[str] = None
-
+    
     # No refining, only rendering for novel views
     render_only: bool = False
     # Refining w/o reference
@@ -952,6 +955,7 @@ class Runner:
             ref_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Ref/{i:04d}.png" for i in range(len(novel_poses))]
             pred_and_corrupted_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Pred_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
             fixed_and_corrupted_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Fixed_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
+            sfm_reproj_filter_output_txt_file = f"{self.cfg.novel_views_path}/novel/{step}/sfm_reproj_filter_discard_indices.txt"
             
         else:
             pred_image_paths = [f"{self.render_dir}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
@@ -960,6 +964,7 @@ class Runner:
             ref_image_paths = [f"{self.render_dir}/novel/{step}/Ref/{i:04d}.png" for i in range(len(novel_poses))]
             pred_and_corrupted_image_paths = [f"{self.render_dir}/novel/{step}/Pred_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
             fixed_and_corrupted_image_paths = [f"{self.render_dir}/novel/{step}/Fixed_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
+            sfm_reproj_filter_output_txt_file = f"{self.render_dir}/novel/{step}/sfm_reproj_filter_discard_indices.txt"
             
 
             # Render novel views with the current model
@@ -1069,6 +1074,35 @@ class Runner:
         elif self.cfg.filter_name == "known_corruption":
             print("Filtering with known corruption - using only the images without known corruption for training.")
             filtered_indices = [i for i in range(len(novel_poses)) if i not in corrupt_indices]
+        elif self.cfg.filter_name == "manual":
+            print("Filtering manually - using only the images specified for training.")
+            # read from a txt file the indices of the images to be used for training, one index per line
+            manual_filter_input_txt_file = f"{self.cfg.novel_views_path}/novel/{step}/manual_filter_discard_indices.txt"
+            if not os.path.exists(manual_filter_input_txt_file):
+                raise FileNotFoundError(f"Manual filter input txt file not found: {manual_filter_input_txt_file}")
+            with open(manual_filter_input_txt_file, "r") as f:
+                bad_refined_img_indices = [int(line.strip()) for line in f if line.strip().isdigit()]
+            print(f"Manually filtered out (bad refined image) indices: {sorted(bad_refined_img_indices)}")
+            filtered_indices =  [i for i in range(len(novel_poses)) if i not in bad_refined_img_indices]
+        elif self.cfg.filter_name == "sfm_reproj":
+            print("Filtering with SfM point reprojection error - using only the images with low reprojection error for training.")
+            discard_indices = []
+            for i in tqdm.trange(0, len(novel_poses), desc="Filtering with SfM point reprojection error..."):
+                if should_discard_refined_photometric(
+                    np.array(Image.open(pred_image_paths[i]).convert("RGB")).astype(np.float32) / 255.0,
+                    np.array(Image.open(fixed_image_paths[i]).convert("RGB")).astype(np.float32) / 255.0,
+                    self.parser.points,
+                    self.parser.points_rgb,
+                    self.parser.camtoworlds[i],
+                    self.parser.Ks_dict[self.parser.camera_ids[i]]
+                ):
+                    discard_indices.append(i)
+            print(f"Discarding {len(discard_indices)} images based on SfM reprojection error, discarded fixed image indices: {sorted(discard_indices)}")
+            # output to a txt file the indices of the discarded images, one index per line
+            with open(sfm_reproj_filter_output_txt_file, "w") as f:
+                for idx in sorted(discard_indices):
+                    f.write(f"{idx}\n")
+            filtered_indices = [i for i in range(len(novel_poses)) if i not in discard_indices]
         else:
             raise ValueError(f"Unknown filter name: {self.cfg.filter_name}")
         
