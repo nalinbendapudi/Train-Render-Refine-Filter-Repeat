@@ -1,3 +1,4 @@
+import csv
 from html import parser
 import json
 import math
@@ -21,6 +22,12 @@ import torch.nn.functional as F
 import tqdm
 import tyro
 import viser
+
+# Avoid printing Warnings
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+import logging
+logging.getLogger("diffusers").setLevel(logging.ERROR)
 
 
 from torch import Tensor
@@ -104,7 +111,7 @@ class Config:
     Note  - At each training step, we do the following:
     1. Calculate Loss
     2. Save the checkpoint (if step-1 in save_steps)
-         - save checkpoints in renders/val/<step>
+         - save checkpoints in ckpts/<step>
     3. Optimize
     4. Evaluate the model on val set (if step-1 in eval_steps)
          - save rendered and GT images (input poses) in renders/val/<step>
@@ -124,10 +131,6 @@ class Config:
 
     # Initialization strategy
     init_type: str = "sfm"
-    # init_type: str = "random"
-    # init_type: str = "mono_depth"
-
-    
     # Initial number of GSs. Ignored if using sfm
     init_num_pts: int = 100_000
     # Initial extent of GSs as a multiple of the camera extent. Ignored if using sfm
@@ -142,8 +145,11 @@ class Config:
     init_scale: float = 1.0
     # Weight for SSIM loss
     ssim_lambda: float = 0.2
-    # Weight for iterative 3d update
-    novel_data_lambda: float = 0.3
+
+    # Ratio of loss for novel views vs original views
+    novel_loss_ratio: float = 1.0
+    # Ratio to sample novel views for training. If < 0, it will be set to len(novel_views) / len(original_views)
+    novel_sample_ratio: float = -1
 
     # Near plane clipping distance
     near_plane: float = 0.01
@@ -208,18 +214,30 @@ class Config:
 
     # Path to novel and fixed views
     novel_views_path: Optional[str] = None
+    gt_views_path: Optional[str] = None
 
     # Artificial Corruption
     corruption_ratio: float = 0.0
     rng = np.random.default_rng(42)
-
+    
     # Filters
     filter_name: Optional[str] = None
+    classifier_output_csv_file: Optional[str] = None
     
     # No refining, only rendering for novel views
     render_only: bool = False
     # Refining w/o reference
     refine_wo_ref: bool = False
+
+    # Smaller experiment
+    subset_indices_txt_file: Optional[str] = None
+    use_val_subset_for_eval: bool = False
+    use_bad_renders_for_eval: bool = False
+    use_good_renders_for_eval: bool = False
+    use_bad_renders_for_retrain: bool = False
+    use_good_renders_for_retrain: bool = False
+    use_originals_instead_of_renders: bool = False
+
 
     def adjust_steps(self, factor: float):
         self.eval_steps = [int(i * factor) for i in self.eval_steps]
@@ -334,6 +352,38 @@ def create_splats_with_optimizers(
     }
     return splats, optimizers
 
+
+def read_subsets_from_txt(subset_indices_txt_file: str) -> Tuple[List[int], List[int], List[int]]:
+    
+    data = {}
+    with open(subset_indices_txt_file, "r") as f:
+        lines = [line.strip() for line in f if line.strip()]
+
+    i = 0
+    while i < len(lines):
+        # Example: "val_subset_indices"
+        key = lines[i].split()[0]
+
+        # Next line contains the values
+        values_line = lines[i + 1]
+
+        # Convert comma-separated string → list of ints
+        values = list(map(int, values_line.replace(",", " ").split()))
+
+        data[key] = values
+        i += 2
+
+    val_subset_indices = data["val_subset_indices"]
+    good_render_indices = data["good_render_indices"]
+    bad_render_indices = data["bad_render_indices"]
+
+    overlap_good = set(good_render_indices) & set(val_subset_indices)
+    overlap_bad = set(bad_render_indices) & set(val_subset_indices)
+
+    assert not overlap_good, f"Good render indices overlap with val subset indices: {overlap_good}"
+    assert not overlap_bad, f"Bad render indices overlap with val subset indices: {overlap_bad}"
+
+    return val_subset_indices, good_render_indices, bad_render_indices
 
 class Runner:
     """Engine for training and testing."""
@@ -526,6 +576,28 @@ class Runner:
         self.difix.set_progress_bar_config(disable=True)
         self.difix.to("cuda")
         
+
+        # Smaller experiment
+        if cfg.use_val_subset_for_eval or cfg.use_bad_renders_for_eval or cfg.use_good_renders_for_eval or cfg.use_bad_renders_for_retrain or cfg.use_good_renders_for_retrain:
+            assert cfg.subset_indices_txt_file is not None, "subset_indices_txt_file must be provided when using subsets for eval or retrain"
+            self.val_subset_indices, self.good_render_indices, self.bad_render_indices = read_subsets_from_txt(cfg.subset_indices_txt_file)
+        if cfg.use_originals_instead_of_renders:
+            assert cfg.gt_views_path is not None, "gt_views_path must be provided when use_originals_instead_of_renders is True"
+
+        # Read DINO classifier CSV
+        self.classified_good_indices = []
+        if cfg.classifier_output_csv_file:
+            if not os.path.exists(cfg.classifier_output_csv_file):
+                raise FileNotFoundError(f"Classifier output CSV file not found: {cfg.classifier_output_csv_file}")
+            with open(cfg.classifier_output_csv_file, "r") as f:
+                reader = csv.DictReader(f)
+                for idx, row in enumerate(reader):
+                    if int(row["manual_label"]) == 1:
+                    # if int(row["pred_label"]) == 1:
+                        self.classified_good_indices.append(idx)
+        print("Classified good indices:", self.classified_good_indices)
+            
+
     def rasterize_splats(
         self,
         camtoworlds: Tensor,
@@ -644,22 +716,30 @@ class Runner:
                 self.viewer.lock.acquire()
                 tic = time.time()
 
-            train_novel_ratio = len(trainloader.dataset) / len(self.novelloaders[-1].dataset) if len(self.novelloaders) > 0 else 1.0
-            # train_novel_ratio = 0.7  if len(self.novelloaders) > 0 else 1.0
+            if len(self.novelloaders) > 0:
+                if cfg.novel_sample_ratio < 0.0:
+                    novel_sample_ratio = len(self.novelloaders[-1].dataset) / (len(trainloader.dataset) + len(self.novelloaders[-1].dataset))
+                else:
+                    novel_sample_ratio = cfg.novel_sample_ratio
+            else:
+                novel_sample_ratio = 0.0 
 
-            if random.random() < train_novel_ratio:
+            if random.random() >= novel_sample_ratio:
+                # sample from original views
                 try:
                     data = next(trainloader_iter)
                 except StopIteration:
                     trainloader_iter = iter(trainloader)
                     data = next(trainloader_iter)
+                print(data["image_id"])
                 is_novel_data = False
             else:
+                # sample from novel views
                 try:
                     data = next(self.novelloaders_iter[-1])
                 except StopIteration:
                     self.novelloaders_iter[-1] = iter(self.novelloaders[-1])
-                    data = next(self.novelloaders_iter[-1])        
+                    data = next(self.novelloaders_iter[-1])    
                 is_novel_data = True
 
             camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
@@ -718,9 +798,9 @@ class Runner:
                 bkgd = torch.rand(1, 3, device=device)
                 colors = colors + bkgd * (1.0 - alphas)
 
-            if is_novel_data and alpha_masks is not None:
-                colors = colors * (alpha_masks > 0.5).float()
-                pixels = pixels * (alpha_masks > 0.5).float()
+            # if is_novel_data and alpha_masks is not None:
+            #     colors = colors * (alpha_masks > 0.5).float()
+            #     pixels = pixels * (alpha_masks > 0.5).float()
 
             self.cfg.strategy.step_pre_backward(
                 params=self.splats,
@@ -774,8 +854,8 @@ class Runner:
                     + cfg.scale_reg * torch.abs(torch.exp(self.splats["scales"])).mean()
                 )
 
-            # if is_novel_data:
-            #     loss = loss * cfg.novel_data_lambda
+            if is_novel_data:
+                loss = loss * cfg.novel_loss_ratio
             # else:
             #     loss = loss * 1.5
 
@@ -790,7 +870,7 @@ class Runner:
                 desc += f"pose err={pose_err.item():.6f}| "
             pbar.set_description(desc)
 
-            if world_rank == 0 and cfg.tb_every > 0 and step % cfg.tb_every == 0:
+            if world_rank == 0 and cfg.tb_every > 0 and step==0 or (step+1) % cfg.tb_every == 0:
                 mem = torch.cuda.max_memory_allocated() / 1024**3
                 self.writer.add_scalar("train/loss", loss.item(), step)
                 self.writer.add_scalar("train/l1loss", l1loss.item(), step)
@@ -945,27 +1025,39 @@ class Runner:
         
         num_corrupt = 0
         corrupt_indices = []
+        if self.cfg.corruption_ratio > 0.0:
+            if self.cfg.use_bad_renders_for_retrain:
+                num_corrupt = int(len(self.bad_render_indices) * self.cfg.corruption_ratio)
+                corrupt_indices = self.cfg.rng.choice(self.bad_render_indices, size=num_corrupt, replace=False)
+            elif self.cfg.use_good_renders_for_retrain:
+                num_corrupt = int(len(self.good_render_indices) * self.cfg.corruption_ratio)
+                corrupt_indices = self.cfg.rng.choice(self.good_render_indices, size=num_corrupt, replace=False)
+            else:
+                num_corrupt = int(len(novel_poses) * self.cfg.corruption_ratio)
+                corrupt_indices = self.cfg.rng.choice(len(novel_poses), size=num_corrupt, replace=False)
+            print(f"Corrupt indices: {sorted(corrupt_indices)}")
 
-
+        original_image_paths = [f"{self.cfg.gt_views_path}/{i:04d}.png" for i in range(len(novel_poses))]
+        
         if self.cfg.novel_views_path is not None:
             print(f"Using rendered and fixed views from {self.cfg.novel_views_path}...")
-            pred_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
-            alpha_mask_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Alpha/{i:04d}.png" for i in range(len(novel_poses))]
-            fixed_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Fixed/{i:04d}.png" for i in range(len(novel_poses))]
-            ref_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Ref/{i:04d}.png" for i in range(len(novel_poses))]
-            pred_and_corrupted_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Pred_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
-            fixed_and_corrupted_image_paths = [f"{self.cfg.novel_views_path}/novel/{step}/Fixed_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
-            sfm_reproj_filter_output_txt_file = f"{self.cfg.novel_views_path}/novel/{step}/sfm_reproj_filter_discard_indices.txt"
+            pred_image_paths = [f"{self.cfg.novel_views_path}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
+            alpha_mask_paths = [f"{self.cfg.novel_views_path}/Alpha/{i:04d}.png" for i in range(len(novel_poses))]
+            fixed_image_paths = [f"{self.cfg.novel_views_path}/Fixed/{i:04d}.png" for i in range(len(novel_poses))]
+            ref_image_paths = [f"{self.cfg.novel_views_path}/Ref/{i:04d}.png" for i in range(len(novel_poses))]
+            pred_and_corrupted_image_paths = [f"{self.cfg.novel_views_path}/Pred_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
+            fixed_and_corrupted_image_paths = [f"{self.cfg.novel_views_path}/Fixed_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
+            sfm_reproj_filter_output_txt_file = f"{self.cfg.novel_views_path}/sfm_reproj_filter_discard_indices.txt"
             
         else:
             pred_image_paths = [f"{self.render_dir}/novel/{step}/Pred/{i:04d}.png" for i in range(len(novel_poses))]
+            # depth_image_paths = [f"{self.render_dir}/novel/{step}/Depth/{i:04d}.png" for i in range(len(novel_poses))]
             alpha_mask_paths = [f"{self.render_dir}/novel/{step}/Alpha/{i:04d}.png" for i in range(len(novel_poses))]
             fixed_image_paths = [f"{self.render_dir}/novel/{step}/Fixed/{i:04d}.png" for i in range(len(novel_poses))]
             ref_image_paths = [f"{self.render_dir}/novel/{step}/Ref/{i:04d}.png" for i in range(len(novel_poses))]
             pred_and_corrupted_image_paths = [f"{self.render_dir}/novel/{step}/Pred_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
             fixed_and_corrupted_image_paths = [f"{self.render_dir}/novel/{step}/Fixed_and_Corrupted/{i:04d}.png" for i in range(len(novel_poses))]
             sfm_reproj_filter_output_txt_file = f"{self.render_dir}/novel/{step}/sfm_reproj_filter_discard_indices.txt"
-            
 
             # Render novel views with the current model
             camtoworlds_all = torch.from_numpy(novel_poses).float().to(self.device)
@@ -974,8 +1066,15 @@ class Runner:
 
             os.makedirs(f"{self.render_dir}/novel/{step}/Pred", exist_ok=True)
             os.makedirs(f"{self.render_dir}/novel/{step}/Alpha", exist_ok=True)
+            os.makedirs(f"{self.render_dir}/novel/{step}/Depth", exist_ok=True)
+
 
             for i in tqdm.trange(0, len(camtoworlds_all), desc="Rendering trajectory"):
+                if ((self.cfg.use_bad_renders_for_retrain and self.cfg.use_good_renders_for_retrain and i not in self.bad_render_indices and i not in self.good_render_indices)
+                    or (self.cfg.use_bad_renders_for_retrain and not self.cfg.use_good_renders_for_retrain and i not in self.bad_render_indices) 
+                    or (self.cfg.use_good_renders_for_retrain and not self.cfg.use_bad_renders_for_retrain and i not in self.good_render_indices)):
+                    continue
+
                 camtoworlds = camtoworlds_all[i:i+1]  # [1, 4, 4]
                 Ks = K[None].repeat(camtoworlds.shape[0], 1, 1)
 
@@ -991,34 +1090,55 @@ class Runner:
                 )  # [1, H, W, 4]
 
                 colors = torch.clamp(renders[0, ..., 0:3], 0.0, 1.0)  # [H, W, 3]
-                depths = renders[0, ..., 3:4]  # [H, W, 1]
-                depths = (depths - depths.min()) / (depths.max() - depths.min()) # NOT doing anything with depth for now
-                    
                 colors_canvas = colors.cpu().numpy()
                 colors_canvas = (colors_canvas * 255).astype(np.uint8)
                 imageio.imwrite(pred_image_paths[i], colors_canvas)
-                
+
+                # depths = renders[0, ..., 3:4]  # [H, W, 1]
+                # depths = (depths.max() - depths) / (depths.max() - depths.min())
+                # depths_canvas = depths.cpu().numpy()
+                # depths_canvas = (depths_canvas * 255).astype(np.uint8)
+                # imageio.imwrite(depth_image_paths[i], depths_canvas.squeeze())
+
                 alphas_canvas = alphas[0].float().cpu().numpy()
                 alphas_canvas = (alphas_canvas * 255).astype(np.uint8)
                 Image.fromarray(alphas_canvas.squeeze(), mode='L').save(alpha_mask_paths[i])
             
+            # Add corruption to a portion of the rendered images, if specified in the config
+            if self.cfg.corruption_ratio > 0.0:
+                os.makedirs(f"{self.render_dir}/novel/{step}/Pred_and_Corrupted", exist_ok=True)
+                for i in tqdm.trange(0, len(novel_poses), desc="Adding corruption..."):
+                    if ((self.cfg.use_bad_renders_for_retrain and self.cfg.use_good_renders_for_retrain and i not in self.bad_render_indices and i not in self.good_render_indices)
+                    or (self.cfg.use_bad_renders_for_retrain and not self.cfg.use_good_renders_for_retrain and i not in self.bad_render_indices) 
+                    or (self.cfg.use_good_renders_for_retrain and not self.cfg.use_bad_renders_for_retrain and i not in self.good_render_indices)):
+                        continue
+                    pred_image = Image.open(pred_image_paths[i]).convert("RGB")
+                    if i in corrupt_indices:
+                        pred_and_corrupted_image = gs_like_corruption(pred_image, np.random.default_rng(i))
+                    else:
+                        pred_and_corrupted_image = pred_image
+                    pred_and_corrupted_image.save(pred_and_corrupted_image_paths[i])
+
 
             # Fix artifacts with difix
             if not self.cfg.render_only:
                 
                 os.makedirs(f"{self.render_dir}/novel/{step}/Fixed", exist_ok=True)
-                os.makedirs(f"{self.render_dir}/novel/{step}/Ref", exist_ok=True)
-
+                
                 if not self.cfg.refine_wo_ref:
+                    os.makedirs(f"{self.render_dir}/novel/{step}/Ref", exist_ok=True)
                     ref_image_indices = self.interpolator.find_nearest_assignments(self.parser.camtoworlds[self.trainset.indices], novel_poses)
-                    ref_image_paths = [self.parser.image_paths[i] for i in np.array(self.trainset.indices)[ref_image_indices]]
-                    assert len(pred_image_paths) == len(ref_image_paths) == len(novel_poses)
-
+                    input_ref_image_paths = [self.parser.image_paths[i] for i in np.array(self.trainset.indices)[ref_image_indices]]
+                    
                 for i in tqdm.trange(0, len(novel_poses), desc="Fixing artifacts..."):
+                    if ((self.cfg.use_bad_renders_for_retrain and self.cfg.use_good_renders_for_retrain and i not in self.bad_render_indices and i not in self.good_render_indices)
+                    or (self.cfg.use_bad_renders_for_retrain and not self.cfg.use_good_renders_for_retrain and i not in self.bad_render_indices) 
+                    or (self.cfg.use_good_renders_for_retrain and not self.cfg.use_bad_renders_for_retrain and i not in self.good_render_indices)):
+                        continue
                     image = Image.open(pred_image_paths[i]).convert("RGB")
                     ref_image = None
                     if not self.cfg.refine_wo_ref:
-                        ref_image = Image.open(ref_image_paths[i]).convert("RGB")
+                        ref_image = Image.open(input_ref_image_paths[i]).convert("RGB")
                         ref_image = ref_image.resize(image.size, Image.LANCZOS)
                         if ref_image is not None:
                             ref_image.save(ref_image_paths[i])
@@ -1026,32 +1146,29 @@ class Runner:
                     if self.cfg.refine_wo_ref or ref_image is None:
                         fixed_image = self.difix(prompt="remove degradation", image=image, num_inference_steps=1, timesteps=[199], guidance_scale=0.0).images[0]    
                     fixed_image = fixed_image.resize(image.size, Image.LANCZOS)
-                    fixed_image.save(fixed_image_paths[i])    
+                    fixed_image.save(fixed_image_paths[i])
 
+                # Add corruption to a portion of the fixed images, if specified in the config
+                if self.cfg.corruption_ratio > 0.0:
+                    os.makedirs(f"{self.render_dir}/novel/{step}/Fixed_and_Corrupted", exist_ok=True)    
+                    for i in tqdm.trange(0, len(novel_poses), desc="Adding corruption..."):
+                        if ((self.cfg.use_bad_renders_for_retrain and self.cfg.use_good_renders_for_retrain and i not in self.bad_render_indices and i not in self.good_render_indices)
+                        or (self.cfg.use_bad_renders_for_retrain and not self.cfg.use_good_renders_for_retrain and i not in self.bad_render_indices) 
+                        or (self.cfg.use_good_renders_for_retrain and not self.cfg.use_bad_renders_for_retrain and i not in self.good_render_indices)):
+                            continue
+                        fixed_image = Image.open(fixed_image_paths[i]).convert("RGB")
+                        if i in corrupt_indices:
+                            fixed_and_corrupted_image = gs_like_corruption(fixed_image, np.random.default_rng(i))
+                        else:
+                            fixed_and_corrupted_image = fixed_image
+                        fixed_and_corrupted_image.save(fixed_and_corrupted_image_paths[i])    
 
-            # Add corruption to a portion of the images, if specified in the config
-            if self.cfg.corruption_ratio > 0.0:
-                num_corrupt = int(len(novel_poses) * self.cfg.corruption_ratio)
-                corrupt_indices = self.cfg.rng.choice(len(novel_poses), size=num_corrupt, replace=False)
-                print(f"Adding corruption to {num_corrupt} out of {len(novel_poses)} images...")
-                print(f"Corrupt indices: {sorted(corrupt_indices)}")
-                os.makedirs(f"{self.render_dir}/novel/{step}/Pred_and_Corrupted", exist_ok=True)
-                os.makedirs(f"{self.render_dir}/novel/{step}/Fixed_and_Corrupted", exist_ok=True)    
-
-                for i in tqdm.trange(0, len(novel_poses), desc="Adding corruption..."):
-                    pred_image = Image.open(pred_image_paths[i]).convert("RGB")
-                    fixed_image = Image.open(fixed_image_paths[i]).convert("RGB")
-                    if i in corrupt_indices:
-                        pred_and_corrupted_image = gs_like_corruption(pred_image, np.random.default_rng(i))
-                        fixed_and_corrupted_image = gs_like_corruption(fixed_image, np.random.default_rng(i))
-                    else:
-                        pred_and_corrupted_image = pred_image
-                        fixed_and_corrupted_image = fixed_image
-                    pred_and_corrupted_image.save(pred_and_corrupted_image_paths[i])
-                    fixed_and_corrupted_image.save(fixed_and_corrupted_image_paths[i])
 
         # Preparing images for retraining
-        if self.cfg.corruption_ratio <= 0.0:
+        if self.cfg.use_originals_instead_of_renders:
+            print("Using original views for retraining.")
+            image_paths = original_image_paths
+        elif self.cfg.corruption_ratio <= 0.0:
             if self.cfg.render_only:
                 print("Using (uncorrupted) rendered views for retraining.")
                 image_paths = pred_image_paths
@@ -1069,11 +1186,20 @@ class Runner:
 
         # Filtering images before adding to the training set
         if self.cfg.filter_name is None:
-            print("No filtering - using all novel images for training.")    
-            filtered_indices = list(range(len(novel_poses)))
+            print("No filtering - using all novel images for training.")
+            filtered_indices = []
+            if self.cfg.use_bad_renders_for_retrain:
+                filtered_indices += self.bad_render_indices
+            if self.cfg.use_good_renders_for_retrain:
+                filtered_indices += self.good_render_indices
+            if not self.cfg.use_bad_renders_for_retrain and not self.cfg.use_good_renders_for_retrain:  
+                filtered_indices = list(range(len(novel_poses)))
+            print(f"Filtered indices (used for training): {sorted(filtered_indices)}")
+        
         elif self.cfg.filter_name == "known_corruption":
             print("Filtering with known corruption - using only the images without known corruption for training.")
             filtered_indices = [i for i in range(len(novel_poses)) if i not in corrupt_indices]
+        
         elif self.cfg.filter_name == "manual":
             print("Filtering manually - using only the images specified for training.")
             # read from a txt file the indices of the images to be used for training, one index per line
@@ -1084,6 +1210,7 @@ class Runner:
                 bad_refined_img_indices = [int(line.strip()) for line in f if line.strip().isdigit()]
             print(f"Manually filtered out (bad refined image) indices: {sorted(bad_refined_img_indices)}")
             filtered_indices =  [i for i in range(len(novel_poses)) if i not in bad_refined_img_indices]
+        
         elif self.cfg.filter_name == "sfm_reproj":
             print("Filtering with SfM point reprojection error - using only the images with low reprojection error for training.")
             discard_indices = []
@@ -1103,9 +1230,14 @@ class Runner:
                 for idx in sorted(discard_indices):
                     f.write(f"{idx}\n")
             filtered_indices = [i for i in range(len(novel_poses)) if i not in discard_indices]
+
+        elif self.cfg.filter_name == "dino_classifier":
+            filtered_indices = self.classified_good_indices
+
         else:
             raise ValueError(f"Unknown filter name: {self.cfg.filter_name}")
         
+
         # Adding images to the training set
         parser = deepcopy(self.parser)
         parser.test_fraction = 0 # use all the novel images for training, no testing
@@ -1142,7 +1274,17 @@ class Runner:
         )
         ellipse_time = 0
         metrics = defaultdict(list)
+        metrics_good = defaultdict(list)
+        metrics_bad = defaultdict(list)
+
         for i, data in enumerate(tqdm.tqdm(valloader)):
+
+            if ((cfg.use_val_subset_for_eval and i not in self.val_subset_indices)
+                or (self.cfg.use_bad_renders_for_eval and self.cfg.use_good_renders_for_eval and i not in self.bad_render_indices and i not in self.good_render_indices)
+                or (self.cfg.use_bad_renders_for_eval and not self.cfg.use_good_renders_for_eval and i not in self.bad_render_indices) 
+                or (self.cfg.use_good_renders_for_eval and not self.cfg.use_bad_renders_for_eval and i not in self.good_render_indices)):
+                continue
+
             camtoworlds = data["camtoworld"].to(device)  # [1, 4, 4]
             Ks = data["K"].to(device)
             pixels = data["image"].to(device) / 255.0
@@ -1169,21 +1311,32 @@ class Runner:
 
             # colors => predictions, pixels => GT
 
+            if cfg.use_val_subset_for_eval:
+                val_folder_name = "val_subset"
+            elif cfg.use_bad_renders_for_eval and not cfg.use_good_renders_for_eval:
+                val_folder_name = "val_b"
+            elif cfg.use_good_renders_for_eval and not cfg.use_bad_renders_for_eval:
+                val_folder_name = "val_g"
+            elif cfg.use_bad_renders_for_eval and cfg.use_good_renders_for_eval:
+                val_folder_name = "val_bg"
+            else:
+                val_folder_name = "val_all"
+
             if world_rank == 0:
                 # write images
-                pixels_path = f"{self.render_dir}/val/{step}/GT/{i:04d}.png"
+                pixels_path = f"{self.render_dir}/{val_folder_name}/{step}/GT/{i:04d}.png"
                 os.makedirs(os.path.dirname(pixels_path), exist_ok=True)
                 pixels_canvas = pixels.squeeze(0).cpu().numpy()
                 pixels_canvas = (pixels_canvas * 255).astype(np.uint8)
                 imageio.imwrite(pixels_path, pixels_canvas)
 
-                colors_path = f"{self.render_dir}/val/{step}/Pred/{i:04d}.png"
+                colors_path = f"{self.render_dir}/{val_folder_name}/{step}/Pred/{i:04d}.png"
                 os.makedirs(os.path.dirname(colors_path), exist_ok=True)
                 colors_canvas = colors.squeeze(0).cpu().numpy()
                 colors_canvas = (colors_canvas * 255).astype(np.uint8)
                 imageio.imwrite(colors_path, colors_canvas)
                 
-                alphas_path = f"{self.render_dir}/val/{step}/Alpha/{i:04d}.png"
+                alphas_path = f"{self.render_dir}/{val_folder_name}/{step}/Alpha/{i:04d}.png"
                 os.makedirs(os.path.dirname(alphas_path), exist_ok=True)
                 alphas_canvas = (alphas < 0.5).squeeze(0).cpu().numpy()
                 alphas_canvas = (alphas_canvas * 255).astype(np.uint8)
@@ -1194,6 +1347,18 @@ class Runner:
                 metrics["psnr"].append(self.psnr(colors_p, pixels_p))
                 metrics["ssim"].append(self.ssim(colors_p, pixels_p))
                 metrics["lpips"].append(self.lpips(colors_p, pixels_p))
+
+                # Metrics for Classifier based Evaluation
+                if self.cfg.classifier_output_csv_file is not None:
+                    if i in self.classified_good_indices:
+                        metrics_good["psnr"].append(self.psnr(colors_p, pixels_p))
+                        metrics_good["ssim"].append(self.ssim(colors_p, pixels_p))
+                        metrics_good["lpips"].append(self.lpips(colors_p, pixels_p))
+                    else:
+                        metrics_bad["psnr"].append(self.psnr(colors_p, pixels_p))
+                        metrics_bad["ssim"].append(self.ssim(colors_p, pixels_p))
+                        metrics_bad["lpips"].append(self.lpips(colors_p, pixels_p))
+
                 if cfg.use_bilateral_grid:
                     cc_colors = color_correct(colors, pixels)
                     cc_colors_p = cc_colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
@@ -1214,6 +1379,28 @@ class Runner:
                 f"Time: {stats['ellipse_time']:.3f}s/image "
                 f"Number of GS: {stats['num_GS']}"
             )
+
+            # Stats for Classifier based Evaluation
+            if self.cfg.classifier_output_csv_file is not None:
+                stats_good = {k: torch.stack(v).mean().item() for k, v in metrics_good.items()}
+                stats_bad = {k: torch.stack(v).mean().item() for k, v in metrics_bad.items()}
+                print(f"Good: PSNR: {stats_good['psnr']:.3f}, SSIM: {stats_good['ssim']:.4f}, LPIPS: {stats_good['lpips']:.3f} ")
+                print(f"Bad: PSNR: {stats_bad['psnr']:.3f}, SSIM: {stats_bad['ssim']:.4f}, LPIPS: {stats_bad['lpips']:.3f} ")
+
+
+            with open("temp_log_classifier_v2.txt", "a") as f:
+                print(f"data_dir: {self.cfg.data_dir}", file=f)
+                print(f"novel_sample_ratio: {self.cfg.novel_sample_ratio}", file=f)
+                print(f"filter_name: {self.cfg.filter_name}", file=f)
+                print("\nall:", file=f)
+                print(f"{stats['psnr']:.3f}\n{stats['ssim']:.4f}\n{stats['lpips']:.3f}\n", file=f)
+                if self.cfg.classifier_output_csv_file is not None:
+                    print("good:", file=f)
+                    print(f"{stats_good['psnr']:.3f}\n{stats_good['ssim']:.4f}\n{stats_good['lpips']:.3f}\n", file=f)
+                    print("bad:", file=f)
+                    print(f"{stats_bad['psnr']:.3f}\n{stats_bad['ssim']:.4f}\n{stats_bad['lpips']:.3f}\n", file=f)
+
+
             # save stats as json
             with open(f"{self.stats_dir}/{stage}_step{step:04d}.json", "w") as f:
                 json.dump(stats, f)

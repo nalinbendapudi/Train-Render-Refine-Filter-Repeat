@@ -1,0 +1,37 @@
+data_dir: ../../MyData/Mip-Nerf-360/bicycle/
+novel_sample_ratio: 1.0
+filter_name: dino_classifier
+
+all:
+14.743
+0.3725
+0.472
+
+good:
+18.261
+0.4411
+0.403
+
+bad:
+8.987
+0.2602
+0.585
+
+data_dir: ../../MyData/Mip-Nerf-360/stump/
+novel_sample_ratio: 1.0
+filter_name: dino_classifier
+
+all:
+16.107
+0.3019
+0.497
+
+good:
+16.901
+0.3444
+0.441
+
+bad:
+14.968
+0.2409
+0.578

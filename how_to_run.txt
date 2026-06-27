@@ -50,3 +50,31 @@ CUDA_VISIBLE_DEVICES=0 python -m simple_viewer \
 --port 8082
 
 
+=========================================================
+
+TENSORBOARD
+
+tensorboard --logdir_spec \
+train:examples/scene_results/Mip-Nerf-360/bonsai/test_fraction_0.9/init_sfm/common_ckpt_5k/train_and_retrain/tb/,\
+refine:examples/scene_results/Mip-Nerf-360/bonsai/test_fraction_0.9/init_sfm/common_ckpt_5k/novel_ratios_loss_1_sample_-1/refine_and_retrain/tb/,\
+render:examples/scene_results/Mip-Nerf-360/bonsai/test_fraction_0.9/init_sfm/common_ckpt_5k/novel_ratios_loss_1_sample_-1/render_and_retrain/tb/,\
+filter:examples/scene_results/Mip-Nerf-360/bonsai/test_fraction_0.9/init_sfm/common_ckpt_5k/novel_ratios_loss_1_sample_-1/refine_sfm_reproj_filter_and_retrain/tb/
+
+
+
+tensorboard --logdir_spec \
+GS_br_f:examples/scene_results/Mip-Nerf-360/bonsai/test_fraction_0.9/init_sfm/common_ckpt_30k/novel_ratios_loss_1_sample_1_no_alpha_mask/GS_br_f/tb/,\
+GS_gr_f:examples/scene_results/Mip-Nerf-360/bonsai/test_fraction_0.9/init_sfm/common_ckpt_30k/novel_ratios_loss_1_sample_1_no_alpha_mask/GS_gr_f/tb/,\
+GS_br_o:examples/scene_results/Mip-Nerf-360/bonsai/test_fraction_0.9/init_sfm/common_ckpt_30k/novel_ratios_loss_1_sample_1_no_alpha_mask/GS_br_o/tb/,\
+GS_gr_o:examples/scene_results/Mip-Nerf-360/bonsai/test_fraction_0.9/init_sfm/common_ckpt_30k/novel_ratios_loss_1_sample_1_no_alpha_mask/GS_gr_o/tb/
+
+tensorboard --logdir_spec \
+"GS_bgr_o:examples/scene_results/Mip-Nerf-360/bonsai/test_fraction_0.9/init_sfm/common_ckpt_30k/novel_ratios_loss_1_sample_1_no_alpha_mask/GS_bgr_o/tb/, \
+GS_br_o:examples/scene_results/Mip-Nerf-360/bonsai/test_fraction_0.9/init_sfm/common_ckpt_30k/novel_ratios_loss_1_sample_1_no_alpha_mask/GS_br_o/tb/, \
+GS_gr_o:examples/scene_results/Mip-Nerf-360/bonsai/test_fraction_0.9/init_sfm/common_ckpt_30k/novel_ratios_loss_1_sample_1_no_alpha_mask/GS_gr_o/tb/"
+
+tensorboard --logdir_spec \
+"bicycle:examples/scene_results/Mip-Nerf-360/bicycle/test_fraction_0.9/init_sfm/common_ckpt_5k/train_and_retrain/tb/,\
+stump:examples/scene_results/Mip-Nerf-360/stump/test_fraction_0.9/init_sfm/common_ckpt_5k/train_and_retrain/tb/,\
+bicycle_c:examples/scene_results/Mip-Nerf-360/bicycle/test_fraction_0.9/init_sfm/common_ckpt_30k/novel_ratios_loss_1_sample_1_no_alpha_mask/GS_br_c/tb/,\
+stump_c:examples/scene_results/Mip-Nerf-360/stump/test_fraction_0.9/init_sfm/common_ckpt_30k/novel_ratios_loss_1_sample_1_no_alpha_mask/GS_br_c/tb/"

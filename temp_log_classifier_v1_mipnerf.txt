@@ -1,0 +1,532 @@
+../../MyData/Mip-Nerf-360/bicycle/
+novel_sample_ratio: 1.0
+filter_name: None
+
+all:
+14.717
+0.3690
+0.474
+
+good:
+18.777
+0.4453
+0.403
+
+bad:
+9.946
+0.2793
+0.557
+
+../../MyData/Mip-Nerf-360/bicycle/
+novel_sample_ratio: 1.0
+filter_name: dino_classifier
+
+all:
+14.736
+0.3719
+0.473
+
+good:
+18.784
+0.4473
+0.400
+
+bad:
+9.980
+0.2833
+0.558
+
+../../MyData/Mip-Nerf-360/bicycle/
+novel_sample_ratio: -1.0
+filter_name: None
+
+all:
+14.770
+0.3730
+0.474
+
+good:
+18.866
+0.4507
+0.403
+
+bad:
+9.957
+0.2817
+0.557
+
+../../MyData/Mip-Nerf-360/bicycle/
+novel_sample_ratio: -1.0
+filter_name: dino_classifier
+
+all:
+14.800
+0.3770
+0.474
+
+good:
+18.890
+0.4534
+0.401
+
+bad:
+9.993
+0.2872
+0.559
+
+data_dir: ../../MyData/Mip-Nerf-360/bonsai/
+novel_sample_ratio: 1.0
+filter_name: None
+
+all:
+25.635
+0.8651
+0.130
+
+good:
+25.706
+0.8639
+0.133
+
+bad:
+25.328
+0.8702
+0.117
+
+data_dir: ../../MyData/Mip-Nerf-360/bonsai/
+novel_sample_ratio: 1.0
+filter_name: dino_classifier
+
+all:
+25.533
+0.8610
+0.133
+
+good:
+25.712
+0.8635
+0.133
+
+bad:
+24.757
+0.8505
+0.134
+
+data_dir: ../../MyData/Mip-Nerf-360/bonsai/
+novel_sample_ratio: -1.0
+filter_name: None
+
+all:
+25.765
+0.8681
+0.128
+
+good:
+25.828
+0.8668
+0.131
+
+bad:
+25.491
+0.8739
+0.114
+
+data_dir: ../../MyData/Mip-Nerf-360/bonsai/
+novel_sample_ratio: -1.0
+filter_name: dino_classifier
+
+all:
+25.746
+0.8665
+0.129
+
+good:
+25.864
+0.8668
+0.131
+
+bad:
+25.235
+0.8651
+0.122
+
+data_dir: ../../MyData/Mip-Nerf-360/counter/
+novel_sample_ratio: 1.0
+filter_name: None
+
+all:
+22.729
+0.7673
+0.183
+
+good:
+22.966
+0.7814
+0.178
+
+bad:
+22.464
+0.7516
+0.189
+
+data_dir: ../../MyData/Mip-Nerf-360/counter/
+novel_sample_ratio: 1.0
+filter_name: dino_classifier
+
+all:
+22.329
+0.7442
+0.195
+
+good:
+22.937
+0.7786
+0.177
+
+bad:
+21.649
+0.7057
+0.214
+
+data_dir: ../../MyData/Mip-Nerf-360/counter/
+novel_sample_ratio: -1.0
+filter_name: None
+
+all:
+22.799
+0.7707
+0.182
+
+good:
+23.042
+0.7847
+0.177
+
+bad:
+22.528
+0.7552
+0.187
+
+data_dir: ../../MyData/Mip-Nerf-360/counter/
+novel_sample_ratio: -1.0
+filter_name: dino_classifier
+
+all:
+22.674
+0.7648
+0.185
+
+good:
+23.036
+0.7841
+0.175
+
+bad:
+22.269
+0.7431
+0.195
+
+data_dir: ../../MyData/Mip-Nerf-360/garden/
+novel_sample_ratio: 1.0
+filter_name: None
+
+all:
+21.678
+0.6073
+0.273
+
+good:
+22.610
+0.6264
+0.268
+
+bad:
+20.369
+0.5805
+0.282
+
+data_dir: ../../MyData/Mip-Nerf-360/garden/
+novel_sample_ratio: 1.0
+filter_name: dino_classifier
+
+all:
+21.520
+0.6007
+0.278
+
+good:
+22.591
+0.6249
+0.267
+
+bad:
+20.015
+0.5665
+0.293
+
+data_dir: ../../MyData/Mip-Nerf-360/garden/
+novel_sample_ratio: -1.0
+filter_name: None
+
+all:
+21.761
+0.6114
+0.271
+
+good:
+22.710
+0.6306
+0.265
+
+bad:
+20.426
+0.5844
+0.280
+
+data_dir: ../../MyData/Mip-Nerf-360/garden/
+novel_sample_ratio: -1.0
+filter_name: dino_classifier
+
+all:
+21.676
+0.6100
+0.273
+
+good:
+22.723
+0.6312
+0.264
+
+bad:
+20.205
+0.5801
+0.286
+
+data_dir: ../../MyData/Mip-Nerf-360/kitchen/
+novel_sample_ratio: 1.0
+filter_name: None
+
+all:
+24.277
+0.8383
+0.138
+
+good:
+24.838
+0.8349
+0.142
+
+bad:
+23.429
+0.8435
+0.133
+
+data_dir: ../../MyData/Mip-Nerf-360/kitchen/
+novel_sample_ratio: 1.0
+filter_name: dino_classifier
+
+all:
+23.815
+0.8063
+0.154
+
+good:
+24.816
+0.8326
+0.141
+
+bad:
+22.304
+0.7667
+0.173
+
+data_dir: ../../MyData/Mip-Nerf-360/kitchen/
+novel_sample_ratio: -1.0
+filter_name: None
+
+all:
+24.399
+0.8431
+0.135
+
+good:
+24.975
+0.8401
+0.137
+
+bad:
+23.531
+0.8478
+0.130
+
+data_dir: ../../MyData/Mip-Nerf-360/kitchen/
+novel_sample_ratio: -1.0
+filter_name: dino_classifier
+
+all:
+24.299
+0.8385
+0.138
+
+good:
+24.962
+0.8386
+0.138
+
+bad:
+23.296
+0.8383
+0.137
+
+data_dir: ../../MyData/Mip-Nerf-360/room/
+novel_sample_ratio: 1.0
+filter_name: None
+
+all:
+25.410
+0.8454
+0.165
+
+good:
+25.129
+0.8397
+0.170
+
+bad:
+26.098
+0.8594
+0.151
+
+data_dir: ../../MyData/Mip-Nerf-360/room/
+novel_sample_ratio: 1.0
+filter_name: dino_classifier
+
+all:
+25.108
+0.8379
+0.173
+
+good:
+25.105
+0.8387
+0.170
+
+bad:
+25.116
+0.8360
+0.178
+
+data_dir: ../../MyData/Mip-Nerf-360/room/
+novel_sample_ratio: -1.0
+filter_name: None
+
+all:
+25.503
+0.8478
+0.163
+
+good:
+25.231
+0.8422
+0.169
+
+bad:
+26.168
+0.8614
+0.150
+
+data_dir: ../../MyData/Mip-Nerf-360/room/
+novel_sample_ratio: -1.0
+filter_name: dino_classifier
+
+all:
+25.417
+0.8459
+0.165
+
+good:
+25.222
+0.8420
+0.168
+
+bad:
+25.895
+0.8555
+0.157
+
+data_dir: ../../MyData/Mip-Nerf-360/stump/
+novel_sample_ratio: 1.0
+filter_name: None
+
+all:
+16.081
+0.3005
+0.494
+
+good:
+19.715
+0.4206
+0.354
+
+bad:
+14.498
+0.2481
+0.555
+
+data_dir: ../../MyData/Mip-Nerf-360/stump/
+novel_sample_ratio: 1.0
+filter_name: dino_classifier
+
+all:
+16.098
+0.3005
+0.503
+
+good:
+19.768
+0.4214
+0.348
+
+bad:
+14.498
+0.2478
+0.571
+
+data_dir: ../../MyData/Mip-Nerf-360/stump/
+novel_sample_ratio: -1.0
+filter_name: None
+
+all:
+16.151
+0.3057
+0.495
+
+good:
+19.846
+0.4282
+0.355
+
+bad:
+14.540
+0.2523
+0.556
+
+data_dir: ../../MyData/Mip-Nerf-360/stump/
+novel_sample_ratio: -1.0
+filter_name: dino_classifier
+
+all:
+16.239
+0.3147
+0.501
+
+good:
+19.941
+0.4334
+0.350
+
+bad:
+14.626
+0.2630
+0.567
+
